@@ -6,6 +6,8 @@ Real-time dashboard with direct data fetching
 
 import time
 import threading
+import json
+import os
 from datetime import datetime, timedelta
 from flask import Flask, render_template, jsonify, request
 from legacy_chilicon_monitor import ChiliconLegacyMonitor
@@ -39,6 +41,10 @@ class EnhancedDashboard:
         
         # Historical data for charts
         self.power_history = []
+        self.power_history_file = 'power_history_cache.json'
+        
+        # Load existing power history
+        self._load_power_history()
         
         # Session management - track last website access
         self.last_website_access = None
@@ -154,6 +160,9 @@ class EnhancedDashboard:
                     entry for entry in self.power_history
                     if datetime.fromisoformat(entry['timestamp']) > cutoff_time
                 ]
+                
+                # Save power history to cache
+                self._save_power_history()
                 
                 # Get inverter data
                 inverter_data = monitor.get_individual_inverter_data(
@@ -272,6 +281,40 @@ class EnhancedDashboard:
                 continue
 
         return recent_history
+    
+    def _load_power_history(self):
+        """Load power history from cache file"""
+        try:
+            if os.path.exists(self.power_history_file):
+                with open(self.power_history_file, 'r') as f:
+                    data = json.load(f)
+                    self.power_history = data.get('power_history', [])
+                    
+                    # Clean old entries (older than 24 hours)
+                    cutoff_time = datetime.now() - timedelta(hours=24)
+                    self.power_history = [
+                        entry for entry in self.power_history
+                        if datetime.fromisoformat(
+                            entry['timestamp']
+                        ) > cutoff_time
+                    ]
+                    print(f"📊 Loaded {len(self.power_history)} cached "
+                          f"power history entries")
+        except Exception as e:
+            print(f"⚠️ Could not load power history cache: {e}")
+            self.power_history = []
+    
+    def _save_power_history(self):
+        """Save power history to cache file"""
+        try:
+            data = {
+                'power_history': self.power_history,
+                'last_saved': datetime.now().isoformat()
+            }
+            with open(self.power_history_file, 'w') as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            print(f"⚠️ Could not save power history cache: {e}")
 
 
 # Global dashboard instance
