@@ -469,6 +469,27 @@
             const grid = document.getElementById('inverter-grid');
             const inverters = data.individual_inverters || [];
             
+            // DEBUG: Show debug info on page
+            let debugDiv = document.getElementById('debug-info');
+            if (!debugDiv) {
+                debugDiv = document.createElement('div');
+                debugDiv.id = 'debug-info';
+                debugDiv.style.cssText = 'background: yellow; padding: 10px; margin: 10px; font-family: monospace;';
+                document.body.appendChild(debugDiv);
+            }
+            
+            if (inverters.length > 0) {
+                const firstInv = inverters[0];
+                debugDiv.innerHTML = `
+                    <strong>DEBUG INFO:</strong><br>
+                    Total inverters: ${inverters.length}<br>
+                    First inverter serial: ${firstInv.serial}<br>
+                    First inverter power: ${firstInv.power}<br>
+                    First inverter power_w: ${firstInv.power_w}<br>
+                    Power being used: ${firstInv.power_w || 0}
+                `;
+            }
+            
             // Clear existing inverters
             grid.innerHTML = '';
             
@@ -478,17 +499,17 @@
                 div.className = 'inverter';
                 
                 // Determine status
-                const power = inverter.power || 0;
+                const power = inverter.power_w || 0;
                 const isActive = power > 0.01; // Consider active if > 10W
                 
                 div.classList.add(isActive ? 'active' : 'inactive');
                 
                 div.innerHTML = `
-                    <div>#${index + 1}</div>
+                    <div>${inverter.serial || 'Unknown'}</div>
                     <div>${power.toFixed(2)}W</div>
                 `;
                 
-                div.title = `Serial: ${inverter.serial || 'Unknown'}\nPower: ${power.toFixed(2)}W`;
+                div.title = `Position: ${index + 1}\nSerial: ${inverter.serial || 'Unknown'}\nPower: ${power.toFixed(2)}W`;
                 
                 grid.appendChild(div);
             });
@@ -499,10 +520,10 @@
                 const div = document.createElement('div');
                 div.className = 'inverter unknown';
                 div.innerHTML = `
-                    <div>#${i + 1}</div>
+                    <div>Position ${i + 1}</div>
                     <div>---</div>
                 `;
-                div.title = 'No data available';
+                div.title = `Position: ${i + 1}\nNo data available`;
                 grid.appendChild(div);
             }
         }

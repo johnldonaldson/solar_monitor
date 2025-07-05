@@ -178,10 +178,11 @@ class EnhancedDashboard:
                         )
                         self.current_data['alerts'] = health.get('issues', [])
                     
-                    # Individual inverters (first 10 for display)
+                    # Individual inverters with mapped hex serials (all 25)
                     inverter_map = inverter_data.get('inverter_map', [])
+                    mapped_inverters = self._map_inverter_serials(inverter_map)
                     self.current_data['individual_inverters'] = (
-                        inverter_map[:10]
+                        mapped_inverters
                     )
                 
                 power_kw = self.current_data['power_kw']
@@ -200,6 +201,56 @@ class EnhancedDashboard:
             print(f"❌ Website fetch error: {e}")
             return False
     
+    def _map_inverter_serials(self, inverter_map):
+        """Map inverter positions to actual hex serial numbers"""
+        # Mapping from position to actual hex serial numbers
+        position_to_serial = {
+            0: '90F00179',   # ID: -1863319175
+            1: '90F00170',   # ID: -1863319184
+            2: '90F00173',   # ID: -1863319181
+            3: '90F00188',   # ID: -1863319160
+            4: '90F0015C',   # ID: -1863319204
+            5: 'Unknown_6',  # No mapping available
+            6: '90F00199',   # ID: -1863319143
+            7: '90F0017B',   # ID: -1863319173
+            8: '90F0016C',   # ID: -1863319188
+            9: '90F00167',   # ID: -1863319193
+            10: '90F001B1',  # ID: -1863319119
+            11: '90F00185',  # ID: -1863319163
+            12: '90F001B6',  # ID: -1863319114
+            13: '90F00180',  # ID: -1863319168
+            14: '90F0017A',  # ID: -1863319174
+            15: '90F0017F',  # ID: -1863319169
+            16: '90F001AF',  # ID: -1863319121
+            17: '90F00187',  # ID: -1863319161
+            18: '90F0017E',  # ID: -1863319170
+            19: '90F00175',  # ID: -1863319179
+            20: 'Unknown_21',  # No mapping available
+            21: '90F001AD',  # ID: -1863319123
+            22: '90F001DA',  # ID: -1863319078
+            23: '90F00174',  # ID: -1863319180
+            24: '90F0017D',  # ID: -1863319171
+        }
+        
+        # Update the inverter map with actual serial numbers
+        mapped_inverters = []
+        for inverter in inverter_map:
+            position = inverter.get('index', -1)
+            actual_serial = position_to_serial.get(
+                position, inverter.get('serial', 'Unknown')
+            )
+            
+            # Create updated inverter entry
+            mapped_inverter = {
+                'index': position,
+                'serial': actual_serial,
+                'power_w': inverter.get('power_w', 0),
+                'status': inverter.get('status', 'Unknown')
+            }
+            mapped_inverters.append(mapped_inverter)
+        
+        return mapped_inverters
+
     def get_current_data(self):
         """Get current system data"""
         return self.current_data.copy()
@@ -219,9 +270,8 @@ class EnhancedDashboard:
                     })
             except Exception:
                 continue
-        
+
         return recent_history
-    
 
 
 # Global dashboard instance
