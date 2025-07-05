@@ -1,0 +1,550 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>🔌 Chilicon Solar Dashboard</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        .dashboard {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+        
+        .header {
+            text-align: center;
+            color: white;
+            margin-bottom: 30px;
+        }
+        
+        .header h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+        }
+        
+        .status-indicator {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            margin-right: 8px;
+        }
+        
+        .online { background-color: #4CAF50; }
+        .offline { background-color: #f44336; }
+        
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+        
+        .card {
+            background: rgba(255, 255, 255, 0.95);
+            border-radius: 15px;
+            padding: 25px;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.1);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255,255,255,0.2);
+            transition: transform 0.3s ease;
+        }
+        
+        .card:hover {
+            transform: translateY(-5px);
+        }
+        
+        .card-title {
+            font-size: 1.2em;
+            font-weight: bold;
+            color: #333;
+            margin-bottom: 15px;
+            display: flex;
+            align-items: center;
+        }
+        
+        .card-title .icon {
+            font-size: 1.5em;
+            margin-right: 10px;
+        }
+        
+        .metric {
+            font-size: 2.5em;
+            font-weight: bold;
+            color: #2c3e50;
+            margin-bottom: 5px;
+        }
+        
+        .metric.power { color: #e74c3c; }
+        .metric.energy { color: #f39c12; }
+        .metric.lifetime { color: #27ae60; }
+        
+        .unit {
+            font-size: 0.4em;
+            color: #666;
+            font-weight: normal;
+        }
+        
+        .inverter-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(80px, 1fr));
+            gap: 10px;
+            margin-top: 15px;
+        }
+        
+        .inverter {
+            padding: 10px;
+            border-radius: 8px;
+            text-align: center;
+            font-size: 0.9em;
+            font-weight: bold;
+            transition: all 0.3s ease;
+        }
+        
+        .inverter.active {
+            background-color: #d4edda;
+            color: #155724;
+            border: 2px solid #c3e6cb;
+        }
+        
+        .inverter.inactive {
+            background-color: #f8d7da;
+            color: #721c24;
+            border: 2px solid #f5c6cb;
+        }
+        
+        .inverter.unknown {
+            background-color: #fff3cd;
+            color: #856404;
+            border: 2px solid #ffeaa7;
+        }
+        
+        .chart-container {
+            width: 100%;
+            height: 300px;
+            margin-top: 20px;
+        }
+        
+        .alerts {
+            margin-top: 20px;
+        }
+        
+        .alert {
+            background-color: #fff3cd;
+            color: #856404;
+            padding: 12px;
+            border-radius: 5px;
+            margin-bottom: 10px;
+            border-left: 4px solid #ffc107;
+        }
+        
+        .alert.error {
+            background-color: #f8d7da;
+            color: #721c24;
+            border-left-color: #dc3545;
+        }
+        
+        .alert.success {
+            background-color: #d4edda;
+            color: #155724;
+            border-left-color: #28a745;
+        }
+        
+        .health-status {
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-weight: bold;
+            display: inline-block;
+            margin-top: 10px;
+        }
+        
+        .health-excellent {
+            background-color: #d4edda;
+            color: #155724;
+        }
+        
+        .health-good {
+            background-color: #d1ecf1;
+            color: #0c5460;
+        }
+        
+        .health-warning {
+            background-color: #fff3cd;
+            color: #856404;
+        }
+        
+        .health-error {
+            background-color: #f8d7da;
+            color: #721c24;
+        }
+        
+        .last-update {
+            font-size: 0.9em;
+            color: #666;
+            text-align: center;
+            margin-top: 20px;
+        }
+        
+        .progress-bar {
+            width: 100%;
+            height: 20px;
+            background-color: #e0e0e0;
+            border-radius: 10px;
+            overflow: hidden;
+            margin-top: 10px;
+        }
+        
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #4CAF50, #8BC34A);
+            transition: width 0.5s ease;
+        }
+        
+        @media (max-width: 768px) {
+            .grid {
+                grid-template-columns: 1fr;
+            }
+            
+            .header h1 {
+                font-size: 2em;
+            }
+            
+            .metric {
+                font-size: 2em;
+            }
+        }
+    </style>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+    <div class="dashboard">
+        <div class="header">
+            <h1>🔌 Chilicon Solar Dashboard</h1>
+            <p>Real-time monitoring of your solar power system</p>
+        </div>
+        
+        <div class="grid">
+            <!-- Current Power -->
+            <div class="card">
+                <div class="card-title">
+                    <span class="icon">⚡</span>
+                    Current Power
+                    <span id="status-indicator" class="status-indicator offline"></span>
+                </div>
+                <div class="metric power" id="current-power">0.000<span class="unit">kW</span></div>
+                <div class="progress-bar">
+                    <div class="progress-fill" id="power-progress" style="width: 0%"></div>
+                </div>
+            </div>
+            
+            <!-- Today's Energy -->
+            <div class="card">
+                <div class="card-title">
+                    <span class="icon">☀️</span>
+                    Today's Energy
+                </div>
+                <div class="metric energy" id="todays-energy">0.00<span class="unit">kWh</span></div>
+            </div>
+            
+            <!-- Lifetime Energy -->
+            <div class="card">
+                <div class="card-title">
+                    <span class="icon">🌍</span>
+                    Lifetime Energy
+                </div>
+                <div class="metric lifetime" id="lifetime-energy">0.00<span class="unit">MWh</span></div>
+            </div>
+            
+            <!-- System Health -->
+            <div class="card">
+                <div class="card-title">
+                    <span class="icon">🏥</span>
+                    System Health
+                </div>
+                <div id="health-status" class="health-status health-unknown">Checking...</div>
+                <div><strong>Active Inverters:</strong> <span id="active-inverters">0</span>/<span id="total-inverters">25</span></div>
+                <div class="progress-bar">
+                    <div class="progress-fill" id="inverter-progress" style="width: 0%"></div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Power Chart -->
+        <div class="card">
+            <div class="card-title">
+                <span class="icon">📊</span>
+                Power Output (Last 24 Hours)
+            </div>
+            <div class="chart-container">
+                <canvas id="powerChart"></canvas>
+            </div>
+        </div>
+        
+        <!-- Individual Inverters -->
+        <div class="card">
+            <div class="card-title">
+                <span class="icon">🔧</span>
+                Individual Microinverters
+            </div>
+            <div class="inverter-grid" id="inverter-grid">
+                <!-- Inverters will be populated by JavaScript -->
+            </div>
+        </div>
+        
+        <!-- Alerts -->
+        <div class="card">
+            <div class="card-title">
+                <span class="icon">🚨</span>
+                System Alerts
+            </div>
+            <div id="alerts-container">
+                <div class="alert success">System monitoring active</div>
+            </div>
+        </div>
+        
+        <div class="last-update" id="last-update">
+            Last updated: Never
+        </div>
+    </div>
+
+    <script>
+        // Global variables
+        let powerChart;
+        let updateInterval;
+        
+        // Initialize dashboard
+        document.addEventListener('DOMContentLoaded', function() {
+            initializePowerChart();
+            updateDashboard();
+            
+            // Update every 30 seconds
+            updateInterval = setInterval(updateDashboard, 30000);
+        });
+        
+        function initializePowerChart() {
+            const ctx = document.getElementById('powerChart').getContext('2d');
+            
+            powerChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: [],
+                    datasets: [{
+                        label: 'Power (kW)',
+                        data: [],
+                        borderColor: '#e74c3c',
+                        backgroundColor: 'rgba(231, 76, 60, 0.1)',
+                        borderWidth: 2,
+                        fill: true,
+                        tension: 0.4
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        y: {
+                            beginAtZero: true,
+                            title: {
+                                display: true,
+                                text: 'Power (kW)'
+                            }
+                        },
+                        x: {
+                            title: {
+                                display: true,
+                                text: 'Time'
+                            }
+                        }
+                    },
+                    plugins: {
+                        legend: {
+                            display: false
+                        }
+                    }
+                }
+            });
+        }
+        
+        function updateDashboard() {
+            fetch('/api/current')
+                .then(response => response.json())
+                .then(data => {
+                    updateMainMetrics(data);
+                    updateSystemHealth(data);
+                    updateInverters(data);
+                    updateAlerts(data);
+                    updateChart();
+                })
+                .catch(error => {
+                    console.error('Error updating dashboard:', error);
+                    updateConnectionStatus(false);
+                });
+        }
+        
+        function updateMainMetrics(data) {
+            // Update connection status
+            updateConnectionStatus(data.is_online);
+            
+            // Update power
+            const powerElement = document.getElementById('current-power');
+            const power = data.power_kw || 0;
+            powerElement.innerHTML = `${power.toFixed(3)}<span class="unit">kW</span>`;
+            
+            // Update power progress (assuming max 6kW system)
+            const powerProgress = Math.min((power / 6) * 100, 100);
+            document.getElementById('power-progress').style.width = `${powerProgress}%`;
+            
+            // Update today's energy
+            const energyElement = document.getElementById('todays-energy');
+            const energy = data.energy_today_kwh || 0;
+            energyElement.innerHTML = `${energy.toFixed(2)}<span class="unit">kWh</span>`;
+            
+            // Update lifetime energy
+            const lifetimeElement = document.getElementById('lifetime-energy');
+            const lifetime = data.lifetime_energy_mwh || 0;
+            lifetimeElement.innerHTML = `${lifetime.toFixed(2)}<span class="unit">MWh</span>`;
+            
+            // Update last update time
+            if (data.last_update) {
+                const updateTime = new Date(data.last_update);
+                document.getElementById('last-update').textContent = 
+                    `Last updated: ${updateTime.toLocaleTimeString()}`;
+            }
+        }
+        
+        function updateSystemHealth(data) {
+            const healthElement = document.getElementById('health-status');
+            const status = data.health_status || 'Unknown';
+            
+            // Remove old classes
+            healthElement.className = 'health-status';
+            
+            // Add appropriate class
+            switch(status.toLowerCase()) {
+                case 'excellent':
+                    healthElement.classList.add('health-excellent');
+                    break;
+                case 'good':
+                    healthElement.classList.add('health-good');
+                    break;
+                case 'warning':
+                    healthElement.classList.add('health-warning');
+                    break;
+                case 'error':
+                case 'critical':
+                    healthElement.classList.add('health-error');
+                    break;
+                default:
+                    healthElement.classList.add('health-warning');
+            }
+            
+            healthElement.textContent = status;
+            
+            // Update inverter counts
+            const active = data.active_inverters || 0;
+            const total = data.total_inverters || 25;
+            
+            document.getElementById('active-inverters').textContent = active;
+            document.getElementById('total-inverters').textContent = total;
+            
+            // Update inverter progress
+            const inverterProgress = total > 0 ? (active / total) * 100 : 0;
+            document.getElementById('inverter-progress').style.width = `${inverterProgress}%`;
+        }
+        
+        function updateInverters(data) {
+            const grid = document.getElementById('inverter-grid');
+            const inverters = data.individual_inverters || [];
+            
+            // Clear existing inverters
+            grid.innerHTML = '';
+            
+            // Add inverters
+            inverters.forEach((inverter, index) => {
+                const div = document.createElement('div');
+                div.className = 'inverter';
+                
+                // Determine status
+                const power = inverter.power || 0;
+                const isActive = power > 0.01; // Consider active if > 10W
+                
+                div.classList.add(isActive ? 'active' : 'inactive');
+                
+                div.innerHTML = `
+                    <div>#${index + 1}</div>
+                    <div>${power.toFixed(2)}W</div>
+                `;
+                
+                div.title = `Serial: ${inverter.serial || 'Unknown'}\nPower: ${power.toFixed(2)}W`;
+                
+                grid.appendChild(div);
+            });
+            
+            // Fill remaining slots if we have fewer than expected
+            const totalSlots = 25;
+            for (let i = inverters.length; i < totalSlots; i++) {
+                const div = document.createElement('div');
+                div.className = 'inverter unknown';
+                div.innerHTML = `
+                    <div>#${i + 1}</div>
+                    <div>---</div>
+                `;
+                div.title = 'No data available';
+                grid.appendChild(div);
+            }
+        }
+        
+        function updateAlerts(data) {
+            const container = document.getElementById('alerts-container');
+            const alerts = data.alerts || [];
+            
+            // Clear existing alerts
+            container.innerHTML = '';
+            
+            if (alerts.length === 0) {
+                container.innerHTML = '<div class="alert success">✅ No issues detected - System operating normally</div>';
+            } else {
+                alerts.forEach(alert => {
+                    const div = document.createElement('div');
+                    div.className = 'alert error';
+                    div.innerHTML = `⚠️ ${alert}`;
+                    container.appendChild(div);
+                });
+            }
+        }
+        
+        function updateChart() {
+            fetch('/api/history?hours=24')
+                .then(response => response.json())
+                .then(data => {
+                    const history = data.power_history || [];
+                    
+                    powerChart.data.labels = history.map(point => point.time);
+                    powerChart.data.datasets[0].data = history.map(point => point.power);
+                    powerChart.update();
+                })
+                .catch(error => {
+                    console.error('Error updating chart:', error);
+                });
+        }
+        
+        function updateConnectionStatus(isOnline) {
+            const indicator = document.getElementById('status-indicator');
+            indicator.className = `status-indicator ${isOnline ? 'online' : 'offline'}`;
+        }
+    </script>
+</body>
+</html>
