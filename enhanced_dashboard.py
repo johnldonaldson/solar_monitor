@@ -1213,6 +1213,44 @@ def admin_sunset_info():
         return jsonify({'error': str(e)})
 
 
+@app.route('/api/admin/reset-daily-report', methods=['POST'])
+def admin_reset_daily_report():
+    """Reset the daily report flag (for testing/manual correction)"""
+    try:
+        dashboard.daily_report_sent_today = False
+        dashboard.last_daily_report_date = None
+        current_date = datetime.now().date()
+        return jsonify({
+            'success': True, 
+            'message': f'Daily report flag reset for {current_date}',
+            'current_date': str(current_date),
+            'report_sent_today': dashboard.daily_report_sent_today
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+
+@app.route('/api/admin/daily-report-status', methods=['GET'])
+def admin_daily_report_status():
+    """Get current daily report status for debugging"""
+    try:
+        current_date = datetime.now().date()
+        sunset_time = calculate_sunset_time()
+        report_time = sunset_time + timedelta(minutes=dashboard.sunset_buffer_minutes)
+        
+        return jsonify({
+            'current_date': str(current_date),
+            'current_time': datetime.now().strftime('%H:%M:%S'),
+            'report_sent_today': dashboard.daily_report_sent_today,
+            'last_daily_report_date': str(dashboard.last_daily_report_date) if dashboard.last_daily_report_date else None,
+            'today_sunset': sunset_time.strftime('%H:%M'),
+            'today_report_time': report_time.strftime('%H:%M'),
+            'is_past_report_time': datetime.now() >= report_time
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)})
+
+
 def run_dashboard(host='0.0.0.0', port=5000, debug=False):
     """Run the dashboard server"""
     print("🌐 Starting Enhanced Chilicon Dashboard...")

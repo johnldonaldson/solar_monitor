@@ -89,6 +89,7 @@
             <button onclick="saveAlertConfig()">Save Alert Config</button>
             <button onclick="testAlerts()">Test All Alerts</button>
             <button onclick="sendDailyReport()">Send Daily Report Now</button>
+            <button onclick="resetDailyReportFlag()" style="background: #dc3545;">Reset Daily Report Flag</button>
         </div>
         
         <div class="section">
@@ -208,6 +209,60 @@
                 });
             }
         }
+        
+        function resetDailyReportFlag() {
+            if (confirm('This will reset the daily report flag, allowing the system to send today\'s report. Continue?')) {
+                fetch('/api/admin/reset-daily-report', {method: 'POST'})
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        alert('Daily report flag reset! The system can now send today\'s report.');
+                        // Reload sunset info to update the display
+                        loadSunsetInfo();
+                    } else {
+                        alert('Error: ' + data.error);
+                    }
+                });
+            }
+        }
+        
+        function loadSunsetInfo() {
+            fetch('/api/admin/sunset-info')
+            .then(response => response.json())
+            .then(data => {
+                if (data.error) {
+                    document.getElementById('next-sunset-time').textContent = 'Error loading info';
+                    return;
+                }
+                
+                const nextReportTime = data.next_report_time;
+                const nextReportDate = data.next_report_date;
+                const todayDate = new Date().toISOString().split('T')[0];
+                const reportSentToday = data.report_sent_today;
+                
+                let displayText;
+                if (nextReportDate === todayDate && !reportSentToday) {
+                    displayText = `Today at ${nextReportTime} (${data.buffer_minutes} min after sunset)`;
+                } else if (reportSentToday) {
+                    displayText = `Tomorrow at ${nextReportTime} (report already sent today)`;
+                } else {
+                    displayText = `${nextReportDate} at ${nextReportTime}`;
+                }
+                
+                document.getElementById('next-sunset-time').textContent = displayText;
+                document.getElementById('next-sunset-time').title = 
+                    `Today's sunset: ${data.today_sunset}, Report time: ${data.today_report_time}, Current: ${data.current_time}`;
+            })
+            .catch(error => {
+                console.error('Error loading sunset info:', error);
+                document.getElementById('next-sunset-time').textContent = 'Error loading info';
+            });
+        }
+        
+        // Load sunset info when page loads
+        document.addEventListener('DOMContentLoaded', function() {
+            loadSunsetInfo();
+        });
     </script>
 </body>
 </html>
