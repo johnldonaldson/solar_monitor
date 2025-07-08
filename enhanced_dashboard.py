@@ -11,6 +11,7 @@ import os
 from datetime import datetime, timedelta
 from flask import Flask, render_template, jsonify, request
 from legacy_chilicon_monitor import ChiliconLegacyMonitor
+from final_microinverter_extractor import MicroinverterPowerExtractor
 
 app = Flask(__name__)
 
@@ -20,6 +21,12 @@ class EnhancedDashboard:
         self.monitor = ChiliconLegacyMonitor()
         self.username = "johnldonaldson@gmail.com"
         self.password = "P0pc0rn1"
+        
+        # Initialize microinverter power extractor
+        self.microinverter_extractor = MicroinverterPowerExtractor(
+            self.username, self.password
+        )
+        
         self.installation_url = (
             "https://cloud.chiliconpower.com/installation/"
             "384b18e73cb8a7c9364ecbb2b220f774fc815d7aa4126ee574d64f8152ab11c7"
@@ -146,12 +153,18 @@ class EnhancedDashboard:
                     'is_online': True
                 })
                 
-                # Add to power history
+                # Only add to power history if we got valid data
+                # This prevents false zero readings during login failures
                 current_time = datetime.now()
+                power_value = self.current_data['power_kw']
+                
+                # Only record if we have a successful data fetch
+                # Don't record zeros during system login failures
                 self.power_history.append({
                     'time': current_time.strftime('%H:%M'),
-                    'power': self.current_data['power_kw'],
-                    'timestamp': current_time.isoformat()
+                    'power': power_value,
+                    'timestamp': current_time.isoformat(),
+                    'data_source': 'success'  # Mark as successful data fetch
                 })
                 
                 # Keep only last 24 hours
@@ -187,12 +200,34 @@ class EnhancedDashboard:
                         )
                         self.current_data['alerts'] = health.get('issues', [])
                     
-                    # Individual inverters with mapped hex serials (all 25)
-                    inverter_map = inverter_data.get('inverter_map', [])
-                    mapped_inverters = self._map_inverter_serials(inverter_map)
-                    self.current_data['individual_inverters'] = (
-                        mapped_inverters
+                    # Get real-time individual microinverter power data
+                    print("🔍 Extracting individual microinverter power...")
+                    individual_power_data = (
+                        self.microinverter_extractor.extract_individual_power()
                     )
+                    
+                    if individual_power_data:
+                        print(f"✅ Individual power data: "
+                              f"{individual_power_data['total_power']:.1f}W total, "
+                              f"{individual_power_data['active_inverters']}/25 active")
+                        
+                        # Create detailed inverter list with real power data
+                        detailed_inverters = (
+                            self.microinverter_extractor.get_detailed_inverter_data()
+                        )
+                        
+                        self.current_data['individual_inverters'] = detailed_inverters
+                        
+                        # Update active inverters count from real data
+                        self.current_data['active_inverters'] = (
+                            individual_power_data['active_inverters']
+                        )
+                    else:
+                        print("⚠️ Could not get individual power data, using legacy data")
+                        # Fallback to legacy data
+                        inverter_map = inverter_data.get('inverter_map', [])
+                        mapped_inverters = self._map_inverter_serials(inverter_map)
+                        self.current_data['individual_inverters'] = mapped_inverters
                 
                 power_kw = self.current_data['power_kw']
                 active_inv = self.current_data['active_inverters']
@@ -203,7 +238,15 @@ class EnhancedDashboard:
                 
                 return True
             else:
-                print("❌ Failed to get power data")
+                print("❌ Failed to get power data - login or connection issue")
+                # Mark system as temporarily offline but don't record zero power
+                self.current_data.update({
+                    'is_online': False,
+                    'last_update': datetime.now().isoformat(),
+                    'connection_error': True
+                })
+                # Do NOT add power history entry for failed connections
+                # This prevents false zero readings in the power graph
                 return False
                 
         except Exception as e:
@@ -315,6 +358,54 @@ class EnhancedDashboard:
                 json.dump(data, f, indent=2)
         except Exception as e:
             print(f"⚠️ Could not save power history cache: {e}")
+    
+    def clean_false_zero_readings(self):
+        """Remove false zero power readings caused by login failures"""
+        print("🧹 Cleaning false zero power readings...")
+        
+        # Load current history
+        self._load_power_history()
+        
+        original_count = len(self.power_history)
+        
+        # Filter out suspicious zero readings during daylight hours
+        cleaned_history = []
+        for entry in self.power_history:
+            try:
+                # Parse timestamp
+                timestamp = datetime.fromisoformat(entry['timestamp'])
+                hour = timestamp.hour
+                power = entry.get('power', 0)
+                
+                # Check if this is a suspicious zero reading
+                # (zero power during daylight hours 8 AM - 6 PM)
+                is_suspicious_zero = (
+                    power == 0.0 and 
+                    8 <= hour <= 18 and  # Daylight hours
+                    entry.get('data_source') != 'success'  # Not marked as successful
+                )
+                
+                if not is_suspicious_zero:
+                    cleaned_history.append(entry)
+                else:
+                    print(f"   🗑️  Removing suspicious zero reading at {entry['time']} ({power} kW)")
+                    
+            except (ValueError, KeyError) as e:
+                # Keep entry if we can't parse it
+                print(f"   ⚠️  Keeping unparseable entry: {e}")
+                cleaned_history.append(entry)
+        
+        # Update history
+        self.power_history = cleaned_history
+        removed_count = original_count - len(cleaned_history)
+        
+        print(f"✅ Cleaned {removed_count} false zero readings")
+        print(f"📊 Power history: {len(self.power_history)} entries remaining")
+        
+        # Save cleaned history
+        self._save_power_history()
+        
+        return removed_count
 
 
 # Global dashboard instance
