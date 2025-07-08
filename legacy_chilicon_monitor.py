@@ -374,16 +374,16 @@ class ChiliconLegacyMonitor:
             health_status = "🟢 EXCELLENT"
             issues = []
             
-            # Check activity rate
+            # Check activity rate - More strict thresholds
             activity_rate = active / total if total > 0 else 0
-            if activity_rate < 0.8:
+            if activity_rate < 0.95:  # Less than 95% (24/25 or better)
                 health_status = "🟡 GOOD"
                 issues.append(f"Only {activity_rate:.1%} inverters active")
             
-            if activity_rate < 0.6:
+            if activity_rate < 0.85:  # Less than 85% 
                 health_status = "🔶 FAIR"
                 
-            if activity_rate < 0.4:
+            if activity_rate < 0.7:   # Less than 70%
                 health_status = "🔴 POOR"
             
             # Check for underperforming units

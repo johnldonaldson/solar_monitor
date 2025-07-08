@@ -455,35 +455,92 @@ Next report will be sent tomorrow after sunset (~{(sunset_time + timedelta(days=
                             health.get('health_status', 'Unknown')
                         )
                         self.current_data['alerts'] = health.get('issues', [])
+                # Fetch detailed individual inverter analysis data
+                print("� Fetching detailed individual inverter analysis...")
+                detailed_stats = self._fetch_individual_inverter_data()
+                if detailed_stats:
+                    self.current_data['detailed_inverter_stats'] = (
+                        detailed_stats
+                    )
+                    print(f"✅ Detailed analysis: {len(detailed_stats)} "
+                          f"inverters analyzed")
                     
-                    # Get real-time individual microinverter power data
-                    print("🔍 Extracting individual microinverter power...")
+                    # Convert detailed stats to individual_inverters format for compatibility
+                    # Keep power values in kW (don't multiply by 1000)
+                    converted_inverters = []
+                    for i, stats in enumerate(detailed_stats):
+                        converted_inverters.append({
+                            'position': i,
+                            'serial': stats['serial'],
+                            'power_w': stats['current_power'],  # Keep in kW for display
+                            'power': stats['current_power'],    # Keep in kW
+                            'status': 'active' if stats['current_power'] > 0.01 else 'inactive',
+                            'timestamp': datetime.now().isoformat(),
+                            'max_power_today': stats['max_power'],
+                            'avg_power': stats['avg_positive_power'],
+                            'peak_time': stats['peak_time']
+                        })
+                    
+                    self.current_data['individual_inverters'] = converted_inverters
+                    
+                    # Update active inverters count from new data
+                    active_count = len([s for s in detailed_stats if s['current_power'] > 0.01])
+                    self.current_data['active_inverters'] = active_count
+                     # Recalculate health status using accurate detailed data
+                    # Use total inverters from system (25) not just detailed stats count
+                    total_inverters = self.current_data.get('total_inverters', 25)
+                    updated_inverter_data = {
+                        'total_inverters': total_inverters,
+                        'active_inverters': active_count,
+                        'inactive_inverters': (
+                            total_inverters - active_count
+                        ),
+                        'underperforming_count': 0,  # Calculated by health check
+                        'individual_powers': (
+                            [s['current_power'] for s in detailed_stats]
+                        ),
+                        'producing_powers': [
+                            s['current_power'] for s in detailed_stats
+                            if s['current_power'] > 0.01
+                        ]
+                    }
+                    
+                    # Update health status with accurate data
+                    health = monitor.check_inverter_health(updated_inverter_data)
+                    if health:
+                        self.current_data['health_status'] = (
+                            health.get('health_status', 'Unknown')
+                        )
+                        self.current_data['alerts'] = health.get('issues', [])
+                        activity_rate = (
+                            (active_count / total_inverters) * 100 
+                            if total_inverters > 0 else 0
+                        )
+                        status = health.get('health_status', 'Unknown')
+                        print(f"🏥 Health Status: {status} "
+                              f"({active_count}/{total_inverters} active = "
+                              f"{activity_rate:.1f}%)")
+                    
+                    print(f"✅ Updated individual inverters with detailed data: "
+                          f"{active_count}/25 active")
+                else:
+                    print("⚠️ Could not fetch detailed inverter analysis")
+                    # Only use legacy data as absolute fallback
+                    print("🔄 Attempting legacy data extraction as fallback...")
                     individual_power_data = (
                         self.microinverter_extractor.extract_individual_power()
                     )
                     
                     if individual_power_data:
-                        print(f"✅ Individual power data: "
-                              f"{individual_power_data['total_power']:.1f}W total, "
-                              f"{individual_power_data['active_inverters']}/25 active")
-                        
-                        # Create detailed inverter list with real power data
                         detailed_inverters = (
-                            self.microinverter_extractor.get_detailed_inverter_data()
+                            self.microinverter_extractor
+                            .get_detailed_inverter_data()
                         )
-                        
                         self.current_data['individual_inverters'] = detailed_inverters
-                        
-                        # Update active inverters count from real data
-                        self.current_data['active_inverters'] = (
-                            individual_power_data['active_inverters']
-                        )
+                        self.current_data['active_inverters'] = individual_power_data['active_inverters']
+                        print("⚠️ Using legacy fallback data")
                     else:
-                        print("⚠️ Could not get individual power data, using legacy data")
-                        # Fallback to legacy data
-                        inverter_map = inverter_data.get('inverter_map', [])
-                        mapped_inverters = self._map_inverter_serials(inverter_map)
-                        self.current_data['individual_inverters'] = mapped_inverters
+                        print("❌ Both detailed and legacy data fetch failed")
                 
                 power_kw = self.current_data['power_kw']
                 active_inv = self.current_data['active_inverters']
@@ -821,6 +878,152 @@ Configure timing and alerts at: http://localhost:5001/admin
             error_msg = str(e)
             print(f"❌ Daily report error: {error_msg}")
 
+    def _fetch_individual_inverter_data(self):
+        """Fetch individual inverter power data from Chilicon API"""
+        try:
+            import requests
+            from collections import defaultdict
+            import statistics
+            
+            # Today's date for the API call
+            today = datetime.now().strftime("%Y-%m-%d")
+            fetchdata_url = f"https://cloud.chiliconpower.com/ajax/fetchData?selection=p_out_avg&lastDay={today}&timeSpan=1&aggregateView=none"
+            
+            # Known inverter ID mappings
+            inverter_id_map = {
+                -1863319175: '90F00179',  # Position 0
+                -1863319184: '90F00170',  # Position 1  
+                -1863319181: '90F00173',  # Position 2
+                -1863319160: '90F00188',  # Position 3
+                -1863319204: '90F0015C',  # Position 4
+                -1863319143: '90F00199',  # Position 6
+                -1863319173: '90F0017B',  # Position 7
+                -1863319188: '90F0016C',  # Position 8
+                -1863319193: '90F00167',  # Position 9
+                -1863319119: '90F001B1',  # Position 10
+                -1863319163: '90F00185',  # Position 11
+                -1863319114: '90F001B6',  # Position 12
+                -1863319168: '90F00180',  # Position 13
+                -1863319174: '90F0017A',  # Position 14
+                -1863319169: '90F0017F',  # Position 15
+                -1863319121: '90F001AF',  # Position 16
+                -1863319161: '90F00187',  # Position 17
+                -1863319170: '90F0017E',  # Position 18
+                -1863319179: '90F00175',  # Position 19
+                -1863319123: '90F001AD',  # Position 21
+                -1863319078: '90F001DA',  # Position 22
+                -1863319180: '90F00174',  # Position 23
+                -1863319171: '90F0017D',  # Position 24
+            }
+            
+            # Create session with proper headers
+            session = requests.Session()
+            session.headers.update({
+                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
+                'Accept': '*/*',
+                'Accept-Encoding': 'gzip, deflate, br, zstd',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Sec-Ch-Ua': '"Google Chrome";v="137", "Chromium";v="137", "Not/A)Brand";v="24"',
+                'Sec-Ch-Ua-Mobile': '?0',
+                'Sec-Ch-Ua-Platform': '"macOS"',
+                'Sec-Fetch-Dest': 'empty',
+                'Sec-Fetch-Mode': 'cors',
+                'Sec-Fetch-Site': 'same-origin',
+                'X-Requested-With': 'XMLHttpRequest'
+            })
+            
+            # Login
+            login_page_url = "https://cloud.chiliconpower.com/login"
+            response = session.get(login_page_url)
+            
+            login_data = {
+                'username': self.username,
+                'password': self.password
+            }
+            
+            response = session.post(login_page_url, data=login_data, allow_redirects=True)
+            
+            if not ("dashboard" in response.url.lower() or "installation" in response.url.lower()):
+                print("❌ Individual inverter data: Login failed")
+                return []
+            
+            # Access installation page for proper session
+            response = session.get(self.installation_url)
+            if response.status_code != 200:
+                print("❌ Individual inverter data: Failed to access installation page")
+                return []
+            
+            # Set referer and fetch data
+            session.headers.update({'Referer': self.installation_url})
+            response = session.get(fetchdata_url)
+            
+            if response.status_code != 200:
+                print(f"❌ Individual inverter data: Failed to fetch data: {response.status_code}")
+                return []
+            
+            # Parse the data
+            data = response.json()
+            print(f"✅ Individual inverter data: Fetched {len(data)} data points")
+            
+            # Group data by inverter ID
+            inverter_data = defaultdict(list)
+            
+            for entry in data:
+                if len(entry) >= 3:
+                    timestamp, power_kw, inverter_id = entry[0], entry[1], entry[2]
+                    
+                    try:
+                        dt = datetime.fromtimestamp(timestamp)
+                        time_str = dt.strftime('%H:%M')
+                    except:
+                        time_str = str(timestamp)
+                    
+                    serial = inverter_id_map.get(inverter_id, f"Unknown_{inverter_id}")
+                    
+                    inverter_data[inverter_id].append({
+                        'timestamp': timestamp,
+                        'time': time_str,
+                        'power_kw': power_kw,
+                        'serial': serial
+                    })
+            
+            # Analyze each inverter
+            inverter_stats = []
+            
+            for inverter_id, readings in inverter_data.items():
+                if not readings:
+                    continue
+                    
+                powers = [r['power_kw'] for r in readings]
+                positive_powers = [p for p in powers if p > 0]
+                
+                serial = readings[0]['serial']
+                
+                stats = {
+                    'inverter_id': inverter_id,
+                    'serial': serial,
+                    'total_readings': len(readings),
+                    'positive_readings': len(positive_powers),
+                    'max_power': max(powers) if powers else 0,
+                    'min_power': min(powers) if powers else 0,
+                    'avg_power': statistics.mean(powers) if powers else 0,
+                    'avg_positive_power': statistics.mean(positive_powers) if positive_powers else 0,
+                    'production_hours': len(positive_powers) * 5 / 60 if positive_powers else 0,
+                    'current_power': powers[-1] if powers else 0,
+                    'peak_time': readings[powers.index(max(powers))]['time'] if powers else 'N/A',
+                    'status': 'Active' if powers[-1] > 0.01 else 'Offline' if powers[-1] == 0 else 'Low Output'
+                }
+                
+                inverter_stats.append(stats)
+            
+            # Sort by current power output
+            inverter_stats.sort(key=lambda x: x['current_power'], reverse=True)
+            
+            return inverter_stats
+            
+        except Exception as e:
+            print(f"❌ Error fetching individual inverter data: {e}")
+            return []
 
 # Global dashboard instance
 dashboard = EnhancedDashboard()
@@ -865,6 +1068,21 @@ def api_history():
     return jsonify({
         'power_history': history,
         'current_power': dashboard.get_current_data()['power_kw']
+    })
+
+
+@app.route('/api/inverters')
+def api_inverters():
+    """Get detailed individual inverter data"""
+    data = dashboard.get_current_data()
+    
+    return jsonify({
+        'individual_inverters': data.get('individual_inverters', []),
+        'detailed_inverter_stats': data.get('detailed_inverter_stats', []),
+        'active_inverters': data.get('active_inverters', 0),
+        'total_inverters': data.get('total_inverters', 25),
+        'last_update': data.get('last_update'),
+        'is_online': data.get('is_online', False)
     })
 
 

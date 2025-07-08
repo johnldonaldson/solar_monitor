@@ -214,6 +214,107 @@
             transition: width 0.5s ease;
         }
         
+        .inverter-analysis {
+            margin-top: 15px;
+        }
+        
+        .analysis-section {
+            margin-bottom: 20px;
+            padding: 15px;
+            background-color: #f8f9fa;
+            border-radius: 8px;
+            border-left: 4px solid #007bff;
+        }
+        
+        .analysis-section h4 {
+            margin: 0 0 10px 0;
+            color: #333;
+            font-size: 1.1em;
+        }
+        
+        .top-performers {
+            display: grid;
+            gap: 10px;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        
+        .performer-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 8px 12px;
+            background: white;
+            border-radius: 5px;
+            border: 1px solid #dee2e6;
+        }
+        
+        .performer-rank {
+            font-weight: bold;
+            color: #007bff;
+            min-width: 30px;
+        }
+        
+        .performer-serial {
+            font-family: monospace;
+            font-weight: bold;
+            color: #333;
+        }
+        
+        .performer-power {
+            color: #28a745;
+            font-weight: bold;
+        }
+        
+        .system-overview {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 15px;
+            margin-bottom: 15px;
+        }
+        
+        .overview-metric {
+            text-align: center;
+            padding: 10px;
+            background: white;
+            border-radius: 5px;
+            border: 1px solid #dee2e6;
+        }
+        
+        .overview-value {
+            font-size: 1.5em;
+            font-weight: bold;
+            color: #007bff;
+        }
+        
+        .overview-label {
+            font-size: 0.9em;
+            color: #666;
+            margin-top: 5px;
+        }
+        
+        .loading {
+            text-align: center;
+            padding: 20px;
+            color: #666;
+            font-style: italic;
+        }
+        
+        .problem-inverters {
+            color: #dc3545;
+        }
+        
+        .problem-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 8px 12px;
+            background: #fff5f5;
+            border-radius: 5px;
+            border: 1px solid #fecaca;
+            margin-bottom: 5px;
+        }
+        
         @media (max-width: 768px) {
             .grid {
                 grid-template-columns: 1fr;
@@ -317,6 +418,17 @@
             </div>
         </div>
         
+        <!-- Detailed Inverter Analysis -->
+        <div class="card">
+            <div class="card-title">
+                <span class="icon">📈</span>
+                Inverter Performance Analysis
+            </div>
+            <div id="inverter-analysis">
+                <div class="loading">Loading detailed inverter analysis...</div>
+            </div>
+        </div>
+        
         <div class="last-update" id="last-update">
             Last updated: Never
         </div>
@@ -394,6 +506,9 @@
                     console.error('Error updating dashboard:', error);
                     updateConnectionStatus(false);
                 });
+            
+            // Also fetch detailed inverter analysis
+            updateInverterAnalysis();
         }
         
         function updateMainMetrics(data) {
@@ -469,43 +584,91 @@
         
         function updateInverters(data) {
             const grid = document.getElementById('inverter-grid');
-            const inverters = data.individual_inverters || [];
+            
+            // Use detailed stats if available, otherwise fall back to individual_inverters
+            const detailedStats = data.detailed_inverter_stats || [];
+            const legacyInverters = data.individual_inverters || [];
             
             // Clear existing inverters
             grid.innerHTML = '';
             
-            // Add inverters
-            inverters.forEach((inverter, index) => {
-                const div = document.createElement('div');
-                div.className = 'inverter';
+            if (detailedStats.length > 0) {
+                // Use new detailed stats data
+                console.log('Using detailed inverter stats:', detailedStats.length);
                 
-                // Determine status
-                const power = inverter.power_w || 0;
-                const isActive = power > 0.01; // Consider active if > 10W
+                detailedStats.forEach((stats, index) => {
+                    const div = document.createElement('div');
+                    div.className = 'inverter';
+                    
+                    // Power is already in kW, display as kW
+                    const powerKw = stats.current_power || 0;
+                    const isActive = stats.current_power > 0.01; // Active if > 0.01kW
+                    
+                    div.classList.add(isActive ? 'active' : 'inactive');
+                    
+                    div.innerHTML = `
+                        <div>${stats.serial}</div>
+                        <div>${powerKw.toFixed(3)}kW</div>
+                    `;
+                    
+                    div.title = `Serial: ${stats.serial}
+Current: ${powerKw.toFixed(3)}kW
+Max Today: ${stats.max_power.toFixed(3)}kW
+Avg Power: ${stats.avg_positive_power.toFixed(3)}kW
+Status: ${stats.status}
+Peak Time: ${stats.peak_time}`;
+                    
+                    grid.appendChild(div);
+                });
                 
-                div.classList.add(isActive ? 'active' : 'inactive');
+                // Fill remaining slots if we have fewer than 25
+                for (let i = detailedStats.length; i < 25; i++) {
+                    const div = document.createElement('div');
+                    div.className = 'inverter unknown';
+                    div.innerHTML = `
+                        <div>Position ${i + 1}</div>
+                        <div>---</div>
+                    `;
+                    div.title = `Position: ${i + 1}\nNo detailed data available`;
+                    grid.appendChild(div);
+                }
                 
-                div.innerHTML = `
-                    <div>${inverter.serial || 'Unknown'}</div>
-                    <div>${power.toFixed(2)}W</div>
-                `;
+            } else {
+                // Fall back to legacy individual_inverters data
+                console.log('Using legacy inverter data:', legacyInverters.length);
                 
-                div.title = `Position: ${index + 1}\nSerial: ${inverter.serial || 'Unknown'}\nPower: ${power.toFixed(2)}W`;
+                legacyInverters.forEach((inverter, index) => {
+                    const div = document.createElement('div');
+                    div.className = 'inverter';
+                    
+                    // Power is now in kW, not W
+                    const powerKw = inverter.power_w || 0;
+                    const isActive = powerKw > 0.01; // Consider active if > 0.01kW (10W)
+                    
+                    div.classList.add(isActive ? 'active' : 'inactive');
+                    
+                    div.innerHTML = `
+                        <div>${inverter.serial || 'Unknown'}</div>
+                        <div>${powerKw.toFixed(3)}kW</div>
+                    `;
+                    
+                    div.title = `Position: ${index + 1}\nSerial: ${inverter.serial || 'Unknown'}\nPower: ${powerKw.toFixed(3)}kW`;
+                    
+                    grid.appendChild(div);
+                });
                 
-                grid.appendChild(div);
-            });
-            
-            // Fill remaining slots if we have fewer than expected
-            const totalSlots = 25;
-            for (let i = inverters.length; i < totalSlots; i++) {
-                const div = document.createElement('div');
-                div.className = 'inverter unknown';
-                div.innerHTML = `
-                    <div>Position ${i + 1}</div>
-                    <div>---</div>
-                `;
-                div.title = `Position: ${i + 1}\nNo data available`;
-                grid.appendChild(div);
+                // Fill remaining slots if we have fewer than expected
+                const totalSlots = 25;
+                for (let i = legacyInverters.length; i < totalSlots; i++) {
+                    const div = document.createElement('div');
+                    div.className = 'inverter unknown';
+                    div.innerHTML = `
+                        <div>Position ${i + 1}</div>
+                        <div>---</div>
+                    `;
+                    div.title = `Position: ${i + 1}\nNo data available`;
+                    grid.appendChild(div);
+                }
             }
         }
         
@@ -546,6 +709,108 @@
         function updateConnectionStatus(isOnline) {
             const indicator = document.getElementById('status-indicator');
             indicator.className = `status-indicator ${isOnline ? 'online' : 'offline'}`;
+        }
+        
+        function updateInverterAnalysis() {
+            fetch('/api/inverters')
+                .then(response => response.json())
+                .then(data => {
+                    const container = document.getElementById('inverter-analysis');
+                    const stats = data.detailed_inverter_stats || [];
+                    
+                    if (stats.length === 0) {
+                        container.innerHTML = '<div class="loading">No detailed analysis data available</div>';
+                        return;
+                    }
+                    
+                    // Calculate system overview
+                    const totalCurrent = stats.reduce((sum, s) => sum + s.current_power, 0);
+                    const totalMax = stats.reduce((sum, s) => sum + s.max_power, 0);
+                    const activeCount = stats.filter(s => s.current_power > 0.01).length;
+                    const efficiency = (activeCount / stats.length * 100).toFixed(1);
+                    
+                    // Create HTML
+                    let html = `
+                        <div class="analysis-section">
+                            <h4>⚡ System Overview</h4>
+                            <div class="system-overview">
+                                <div class="overview-metric">
+                                    <div class="overview-value">${totalCurrent.toFixed(3)}</div>
+                                    <div class="overview-label">Current Power (kW)</div>
+                                </div>
+                                <div class="overview-metric">
+                                    <div class="overview-value">${totalMax.toFixed(3)}</div>
+                                    <div class="overview-label">Peak Power (kW)</div>
+                                </div>
+                                <div class="overview-metric">
+                                    <div class="overview-value">${activeCount}/${stats.length}</div>
+                                    <div class="overview-label">Active Inverters</div>
+                                </div>
+                                <div class="overview-metric">
+                                    <div class="overview-value">${efficiency}%</div>
+                                    <div class="overview-label">System Efficiency</div>
+                                </div>
+                            </div>
+                        </div>
+                    `;
+                    
+                    // Top performers (top 10)
+                    const topPerformers = stats.slice(0, 10);
+                    html += `
+                        <div class="analysis-section">
+                            <h4>🏆 Top 10 Performing Inverters</h4>
+                            <div class="top-performers">
+                    `;
+                    
+                    topPerformers.forEach((stat, index) => {
+                        html += `
+                            <div class="performer-item">
+                                <span class="performer-rank">#${index + 1}</span>
+                                <span class="performer-serial">${stat.serial}</span>
+                                <span class="performer-power">${stat.current_power.toFixed(3)} kW</span>
+                            </div>
+                        `;
+                    });
+                    
+                    html += '</div></div>';
+                    
+                    // Problem inverters
+                    const problemInverters = stats.filter(s => s.current_power === 0 || s.avg_positive_power < 0.5);
+                    if (problemInverters.length > 0) {
+                        html += `
+                            <div class="analysis-section">
+                                <h4 class="problem-inverters">⚠️ Problem Inverters</h4>
+                                <div class="top-performers">
+                        `;
+                        
+                        problemInverters.forEach(stat => {
+                            const status = stat.current_power === 0 ? 'OFFLINE' : 'LOW OUTPUT';
+                            html += `
+                                <div class="problem-item">
+                                    <span class="performer-serial">${stat.serial}</span>
+                                    <span style="color: #dc3545; font-weight: bold;">${status}</span>
+                                    <span class="performer-power">${stat.current_power.toFixed(3)} kW</span>
+                                </div>
+                            `;
+                        });
+                        
+                        html += '</div></div>';
+                    } else {
+                        html += `
+                            <div class="analysis-section">
+                                <h4>✅ System Status</h4>
+                                <p style="color: #28a745; font-weight: bold;">All inverters performing normally!</p>
+                            </div>
+                        `;
+                    }
+                    
+                    container.innerHTML = html;
+                })
+                .catch(error => {
+                    console.error('Error updating inverter analysis:', error);
+                    document.getElementById('inverter-analysis').innerHTML = 
+                        '<div class="loading">Error loading inverter analysis</div>';
+                });
         }
     </script>
 </body>
