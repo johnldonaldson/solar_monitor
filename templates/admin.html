@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Admin Panel - Chilicon Dashboard</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background: #f5f5f5; }
+        .container { max-width: 800px; margin: 0 auto; background: white; padding: 30px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        h1 { color: #333; margin-bottom: 30px; }
+        .form-group { margin-bottom: 20px; }
+        label { display: block; margin-bottom: 5px; font-weight: bold; }
+        input, textarea { width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 5px; font-size: 14px; }
+        button { background: #007bff; color: white; padding: 10px 20px; border: none; border-radius: 5px; cursor: pointer; margin-right: 10px; }
+        button:hover { background: #0056b3; }
+        .back-link { display: inline-block; margin-bottom: 20px; color: #007bff; text-decoration: none; }
+        .back-link:hover { text-decoration: underline; }
+        .section { margin-bottom: 40px; padding-bottom: 30px; border-bottom: 1px solid #eee; }
+        .section:last-child { border-bottom: none; }
+        .password-status { color: #666; font-size: 12px; margin-top: 5px; }
+        .password-saved { color: #28a745; }
+        .password-missing { color: #dc3545; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <a href="/" class="back-link">← Back to Dashboard</a>
+        <h1>⚙️ Admin Panel</h1>
+        
+        <div class="section">
+            <h2>📧 Email Configuration</h2>
+            <div class="form-group">
+                <label for="email">Alert Email Address:</label>
+                <input type="email" id="email" placeholder="your@email.com" value="{{ email_config.email or '' }}">
+            </div>
+            <div class="form-group">
+                <label for="smtp-server">SMTP Server:</label>
+                <input type="text" id="smtp-server" placeholder="smtp.gmail.com" value="{{ email_config.smtp_server or '' }}">
+            </div>
+            <div class="form-group">
+                <label for="smtp-port">SMTP Port:</label>
+                <input type="number" id="smtp-port" placeholder="587" value="{{ email_config.smtp_port or '' }}">
+            </div>
+            <div class="form-group">
+                <label for="smtp-username">SMTP Username:</label>
+                <input type="text" id="smtp-username" placeholder="username" value="{{ email_config.smtp_username or '' }}">
+            </div>
+            <div class="form-group">
+                <label for="smtp-password">SMTP Password:</label>
+                <input type="password" id="smtp-password" placeholder="password" value="{{ email_config.smtp_password or '' }}">
+                <div class="password-status {{ 'password-saved' if email_config.smtp_password else 'password-missing' }}">
+                    {{ '✓ Password saved' if email_config.smtp_password else 'No password saved' }}
+                </div>
+            </div>
+            <button onclick="saveEmailConfig()">Save Email Config</button>
+            <button onclick="testEmail()">Send Test Email</button>
+        </div>
+        
+        <div class="section">
+            <h2>🚨 Alert Configuration</h2>
+            <div class="form-group">
+                <label for="low-power-threshold">Low Power Alert Threshold (kW):</label>
+                <input type="number" id="low-power-threshold" step="0.1" placeholder="0.5" value="{{ alert_config.low_power_threshold or '' }}">
+            </div>
+            <div class="form-group">
+                <label for="offline-alert-minutes">Offline Alert After (minutes):</label>
+                <input type="number" id="offline-alert-minutes" placeholder="30" value="{{ alert_config.offline_alert_minutes or '' }}">
+            </div>
+            <div class="form-group">
+                <label>
+                    <input type="checkbox" id="daily-report-enabled" {{ 'checked' if alert_config.daily_report_enabled else '' }}> Send Daily Status Report
+                </label>
+                <small style="color: #666; display: block; margin-top: 5px;">
+                    Automatically sends a daily summary email after sunset when solar generation stops
+                </small>
+            </div>
+            <div class="form-group">
+                <label style="color: #555;">🌇 Sunset-Based Timing (Automatic)</label>
+                <div style="background: #f8f9fa; padding: 10px; border-radius: 5px; margin-top: 5px;">
+                    <small style="color: #666; display: block;">
+                        📍 <strong>How it works:</strong><br>
+                        • System calculates sunset time daily<br>
+                        • Waits 30 minutes after sunset<br>
+                        • Confirms generation has stopped (< 0.1kW)<br>
+                        • Sends comprehensive end-of-day report<br><br>
+                        📧 <strong>Typical timing:</strong> 6:30-7:30 PM (varies by season)<br>
+                        🔄 <strong>Next report:</strong> <span id="next-sunset-time">Calculating...</span>
+                    </small>
+                </div>
+            </div>
+            <button onclick="saveAlertConfig()">Save Alert Config</button>
+            <button onclick="testAlerts()">Test All Alerts</button>
+            <button onclick="sendDailyReport()">Send Daily Report Now</button>
+        </div>
+        
+        <div class="section">
+            <h2>📱 iMessage Configuration</h2>
+            <div class="form-group">
+                <label>
+                    <input type="checkbox" id="imessage-enabled" {{ 'checked' if imessage_config.imessage_enabled else '' }}> Enable iMessage Notifications
+                </label>
+                <small style="color: #666; display: block; margin-top: 5px;">
+                    Send alerts via iMessage (requires macOS with Messages app)
+                </small>
+            </div>
+            <div class="form-group">
+                <label for="imessage-phone">Phone Number or Email:</label>
+                <input type="text" id="imessage-phone" placeholder="+1234567890 or email@example.com" value="{{ imessage_config.imessage_phone or '' }}">
+                <small style="color: #666; display: block; margin-top: 5px;">
+                    Phone number (with country code) or Apple ID email for iMessage
+                </small>
+            </div>
+            <button onclick="saveIMessageConfig()">Save iMessage Config</button>
+            <button onclick="testIMessage()">Test iMessage</button>
+        </div>
+    </div>
+
+    <script>
+        function saveEmailConfig() {
+            const config = {
+                email: document.getElementById('email').value,
+                smtp_server: document.getElementById('smtp-server').value,
+                smtp_port: parseInt(document.getElementById('smtp-port').value),
+                smtp_username: document.getElementById('smtp-username').value,
+                smtp_password: document.getElementById('smtp-password').value
+            };
+            
+            fetch('/api/admin/email-config', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(config)
+            })
+            .then(response => response.json())
+            .then(data => {
+                alert(data.success ? 'Email config saved!' : 'Error: ' + data.error);
+                if (data.success) {
+                    // Refresh page to update password status
+                    setTimeout(() => location.reload(), 1000);
+                }
+            });
+        }
+        
+        function testEmail() {
+            fetch('/api/admin/test-email', {method: 'POST'})
+            .then(response => response.json())
+            .then(data => {
+                alert(data.success ? 'Test email sent!' : 'Error: ' + data.error);
+            });
+        }
+        
+        function saveAlertConfig() {
+            const config = {
+                low_power_threshold: parseFloat(document.getElementById('low-power-threshold').value),
+                offline_alert_minutes: parseInt(document.getElementById('offline-alert-minutes').value),
+                daily_report_enabled: document.getElementById('daily-report-enabled').checked
+            };
+            
+            fetch('/api/admin/alert-config', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(config)
+            })
+            .then(response => response.json())
+            .then(data => {
+                alert(data.success ? 'Alert config saved!' : 'Error: ' + data.error);
+            });
+        }
+        
+        function testAlerts() {
+            if (confirm('This will send test alert emails for low power and offline conditions. Continue?')) {
+                fetch('/api/admin/test-alerts', {method: 'POST'})
+                .then(response => response.json())
+                .then(data => {
+                    alert(data.success ? 'Test alerts sent! Check your email.' : 'Error: ' + data.error);
+                });
+            }
+        }
+        
+        function saveIMessageConfig() {
+            const config = {
+                imessage_enabled: document.getElementById('imessage-enabled').checked,
+                imessage_phone: document.getElementById('imessage-phone').value
+            };
+            
+            fetch('/api/admin/imessage-config', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(config)
+            })
+            .then(response => response.json())
+            .then(data => {
+                alert(data.success ? 'iMessage config saved!' : 'Error: ' + data.error);
+            });
+        }
+        
+        function testIMessage() {
+            fetch('/api/admin/test-imessage', {method: 'POST'})
+            .then(response => response.json())
+            .then(data => {
+                alert(data.success ? 'Test iMessage sent!' : 'Error: ' + data.error);
+            });
+        }
+        
+        function sendDailyReport() {
+            if (confirm('This will generate and send the daily status report now. Continue?')) {
+                fetch('/api/admin/send-daily-report', {method: 'POST'})
+                .then(response => response.json())
+                .then(data => {
+                    alert(data.success ? 'Daily report sent!' : 'Error: ' + data.error);
+                });
+            }
+        }
+    </script>
+</body>
+</html>

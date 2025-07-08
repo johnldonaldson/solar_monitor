@@ -12,8 +12,61 @@ from datetime import datetime, timedelta
 from flask import Flask, render_template, jsonify, request
 from legacy_chilicon_monitor import ChiliconLegacyMonitor
 from final_microinverter_extractor import MicroinverterPowerExtractor
+import math
 
 app = Flask(__name__)
+
+
+def calculate_sunset_time(latitude=37.7749, longitude=-122.4194):
+    """
+    Calculate sunset time for given coordinates (defaults to San Francisco)
+    Returns sunset time as datetime object for today
+    """
+    try:
+        from datetime import date
+        import math
+        
+        # Julian day calculation
+        today = date.today()
+        n = today.timetuple().tm_yday
+        
+        # Solar declination
+        solar_declination = 23.45 * math.sin(math.radians(360 * (284 + n) / 365))
+        
+        # Hour angle
+        lat_rad = math.radians(latitude)
+        decl_rad = math.radians(solar_declination)
+        
+        cos_hour_angle = -math.tan(lat_rad) * math.tan(decl_rad)
+        
+        # Check for polar day/night
+        if cos_hour_angle > 1:
+            # Polar night - no sunset
+            return datetime.combine(today, datetime.min.time().replace(hour=17))
+        elif cos_hour_angle < -1:
+            # Polar day - no sunset
+            return datetime.combine(today, datetime.min.time().replace(hour=21))
+        
+        hour_angle = math.degrees(math.acos(cos_hour_angle))
+        
+        # Calculate sunset time in hours from solar noon
+        sunset_hour = 12 + hour_angle / 15
+        
+        # Convert to datetime
+        sunset_hours = int(sunset_hour)
+        sunset_minutes = int((sunset_hour - sunset_hours) * 60)
+        
+        sunset_time = datetime.combine(
+            today, 
+            datetime.min.time().replace(hour=sunset_hours, minute=sunset_minutes)
+        )
+        
+        return sunset_time
+        
+    except Exception as e:
+        print(f"⚠️ Sunset calculation error: {e}, using default 6 PM")
+        # Fallback to 6 PM
+        return datetime.combine(date.today(), datetime.min.time().replace(hour=18))
 
 
 class EnhancedDashboard:
@@ -57,11 +110,21 @@ class EnhancedDashboard:
         self.last_website_access = None
         self.website_interval = 900  # 15 minutes in seconds
         
+        # Daily report management
+        self.daily_report_sent_today = False
+        self.last_daily_report_date = None
+        self.sunset_buffer_minutes = 30  # Wait 30 minutes after sunset
+        
         # Start background data updating
         self.monitoring = True
         self.update_thread = threading.Thread(target=self.background_update)
         self.update_thread.daemon = True
         self.update_thread.start()
+        
+        # Start sunset-based daily report scheduler
+        self.daily_report_thread = threading.Thread(target=self.daily_report_scheduler)
+        self.daily_report_thread.daemon = True
+        self.daily_report_thread.start()
     
     def background_update(self):
         """Background thread to update data every 15 minutes ONLY"""
@@ -109,21 +172,214 @@ class EnhancedDashboard:
     
     def _time_until_next_fetch(self):
         """Calculate minutes until next website fetch"""
-        if not self.current_data.get('last_update'):
+        if self.last_website_access is None:
             return 0
         
-        try:
-            last_update_str = self.current_data['last_update']
-            last_update = datetime.fromisoformat(last_update_str)
-            now = datetime.now()
-            time_since = (now - last_update).total_seconds()
-            time_until = max(0, 900 - time_since)  # 15 minutes
-            return round(time_until / 60, 1)  # Return in minutes
-        except Exception:
-            return 0
+        elapsed = (datetime.now() - self.last_website_access).total_seconds()
+        remaining_seconds = max(0, self.website_interval - elapsed)
+        return int(remaining_seconds / 60)
+
+    def daily_report_scheduler(self):
+        """Background thread to send daily reports after sunset when generation stops"""
+        print("🌅 Starting sunset-based daily report scheduler...")
+        
+        while self.monitoring:
+            try:
+                # Check if we should send daily report
+                if self._should_send_daily_report():
+                    print("📊 Time to send daily report - generation has stopped after sunset")
+                    self._send_automatic_daily_report()
+                
+                # Check every 15 minutes
+                time.sleep(900)
+                
+            except Exception as e:
+                print(f"❌ Daily report scheduler error: {e}")
+                time.sleep(900)
     
+    def _should_send_daily_report(self):
+        """Check if it's time to send the daily report (after sunset + buffer)"""
+        try:
+            # Check if daily reports are enabled in alert config
+            alert_config_file = 'alert_config.json'
+            if not os.path.exists(alert_config_file):
+                return False
+                
+            with open(alert_config_file, 'r') as f:
+                alert_config = json.load(f)
+                
+            if not alert_config.get('daily_report_enabled', False):
+                return False
+            
+            # Also check if email is configured
+            email_config_file = 'email_config.json'
+            if not os.path.exists(email_config_file):
+                return False
+            
+            # Calculate sunset time
+            sunset_time = calculate_sunset_time()
+            
+            # Add buffer (wait after sunset)
+            report_time = sunset_time + timedelta(minutes=self.sunset_buffer_minutes)
+            
+            current_time = datetime.now()
+            today = current_time.date()
+            
+            # Check if we haven't sent today's report yet
+            if self.last_daily_report_date == today:
+                return False
+            
+            # Check if it's after the report time
+            if current_time < report_time:
+                return False
+            
+            # Check if power generation has actually stopped (near zero for buffer period)
+            if self._is_generation_stopped():
+                return True
+                
+            return False
+            
+        except Exception as e:
+            print(f"❌ Error checking daily report timing: {e}")
+            return False
+    
+    def _is_generation_stopped(self):
+        """Check if solar generation has stopped (low power for sustained period)"""
+        try:
+            # Look at last few power readings
+            if len(self.power_history) < 3:
+                return False
+            
+            # Check last 3 readings (45 minutes of data)
+            recent_readings = self.power_history[-3:]
+            low_power_threshold = 0.1  # 100W threshold
+            
+            for reading in recent_readings:
+                if reading.get('power_kw', 0) > low_power_threshold:
+                    return False  # Still generating significant power
+            
+            print(f"📉 Generation stopped - last 3 readings below {low_power_threshold}kW")
+            return True
+            
+        except Exception as e:
+            print(f"❌ Error checking generation status: {e}")
+            return False
+    
+    def _send_automatic_daily_report(self):
+        """Send the daily report automatically after sunset"""
+        try:
+            print("📧 Sending automatic daily report...")
+            
+            # Create and send daily report
+            result = self._generate_and_send_daily_report()
+            
+            if result.get('success'):
+                # Mark as sent for today
+                self.last_daily_report_date = datetime.now().date()
+                self.daily_report_sent_today = True
+                print("✅ Automatic daily report sent successfully")
+            else:
+                print(f"❌ Failed to send automatic daily report: {result.get('error')}")
+                
+        except Exception as e:
+            print(f"❌ Error sending automatic daily report: {e}")
+
+    def _generate_and_send_daily_report(self):
+        """Generate and send the daily report with sunset context"""
+        try:
+            import smtplib
+            from email.mime.text import MIMEText
+            
+            # Load email config
+            config_file = 'email_config.json'
+            if not os.path.exists(config_file):
+                return {'success': False, 'error': 'Email not configured'}
+                
+            with open(config_file, 'r') as f:
+                config = json.load(f)
+            
+            # Get current system data and today's history
+            current_data = self.get_current_data()
+            today_history = self.get_power_history(24)
+            
+            # Calculate sunset time for context
+            sunset_time = calculate_sunset_time()
+            
+            # Calculate daily stats
+            if today_history:
+                max_power = max([entry['power'] for entry in today_history])
+                avg_power = sum([entry['power'] for entry in today_history]) / len(today_history)
+                
+                # Calculate production hours (power > 0.1kW)
+                production_hours = sum(1 for entry in today_history if entry['power'] > 0.1) / 4  # 15-min intervals
+            else:
+                max_power = avg_power = production_hours = 0
+            
+            # Determine timing context
+            current_time = datetime.now()
+            time_after_sunset = current_time - sunset_time
+            timing_note = f"Sent {time_after_sunset.total_seconds()/3600:.1f} hours after sunset"
+            
+            # Create enhanced daily report
+            report_body = f"""📊 Daily Solar Report - {datetime.now().strftime('%Y-%m-%d')}
+
+🌅 SUNSET-BASED TIMING:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🌇 Today's Sunset: {sunset_time.strftime('%H:%M')}
+⏰ Report Time: {current_time.strftime('%H:%M')} ({timing_note})
+📈 Generation Stopped: System has been below 0.1kW for 45+ minutes
+
+🌞 TODAY'S PERFORMANCE:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+⚡ Final Power Output: {current_data.get('power_kw', 0):.3f} kW (end of day)
+📈 Peak Power Today: {max_power:.3f} kW  
+📊 Average Power: {avg_power:.3f} kW
+🔋 Total Energy Generated: {current_data.get('energy_today_kwh', 0):.2f} kWh
+⏱️ Production Hours: {production_hours:.1f} hours
+🏆 Lifetime Energy: {current_data.get('lifetime_energy_mwh', 0):.2f} MWh
+
+🔧 SYSTEM STATUS:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🟢 System Status: {'Online' if current_data.get('is_online') else 'Offline'}
+🔌 Active Inverters: {current_data.get('active_inverters', 0)}/{current_data.get('total_inverters', 25)}
+🏥 Health Status: {current_data.get('health_status', 'Unknown')}
+📊 Efficiency: {((current_data.get('active_inverters', 0) / current_data.get('total_inverters', 25)) * 100):.1f}% inverters active
+🕐 Last Data Update: {current_data.get('last_update', 'Unknown')}
+
+💡 END-OF-DAY ANALYSIS:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📉 Generation Status: {'✅ Normal shutdown after sunset' if current_data.get('power_kw', 0) < 0.1 else '⚠️ Still generating after sunset'}
+🔋 Daily Performance: {'✅ Good' if current_data.get('energy_today_kwh', 0) > 10 else '⚠️ Low production'}
+🔧 System Health: {'✅ All systems nominal' if current_data.get('active_inverters', 0) >= 20 else '⚠️ Some inverters offline'}
+
+🌐 Dashboard: http://localhost:5001
+⚙️ Configure alerts: http://localhost:5001/admin
+📅 Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+This automated daily report is sent after sunset when solar generation stops.
+Next report will be sent tomorrow after sunset (~{(sunset_time + timedelta(days=1)).strftime('%H:%M')}).
+"""
+            
+            # Send email
+            msg = MIMEText(report_body)
+            msg['Subject'] = f'🌇 End-of-Day Solar Report - {datetime.now().strftime("%m/%d/%Y")}'
+            msg['From'] = config['smtp_username']
+            msg['To'] = config['email']
+            
+            server = smtplib.SMTP(config['smtp_server'], int(config['smtp_port']))
+            server.starttls()
+            server.login(config['smtp_username'], config['smtp_password'])
+            server.send_message(msg)
+            server.quit()
+            
+            return {'success': True}
+            
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+
     def _fetch_from_website(self):
-        """Actually fetch data from the Chilicon website"""
+        """Fetch fresh data from the website"""
         try:
             print("🌐 Contacting Chilicon website...")
             
@@ -406,6 +662,164 @@ class EnhancedDashboard:
         self._save_power_history()
         
         return removed_count
+    
+    def daily_report_scheduler(self):
+        """Background thread to send daily reports based on sunset time"""
+        print("🌅 Starting daily report scheduler...")
+        while self.monitoring:
+            try:
+                # Check if we already sent the report today
+                if self.daily_report_sent_today:
+                    # Sleep until tomorrow
+                    time_until_midnight = (
+                        datetime.combine(datetime.now().date() + timedelta(days=1), datetime.min.time()) -
+                        datetime.now()
+                    ).total_seconds()
+                    print(f"⏳ Waiting for midnight to reset daily report flag ({time_until_midnight/60:.1f} minutes)")
+                    time.sleep(time_until_midnight)
+                    self.daily_report_sent_today = False
+                    continue
+                
+                # Calculate sunset time for today
+                sunset_time = calculate_sunset_time()
+                sunset_time = sunset_time.replace(tzinfo=None)  # Remove timezone info for comparison
+                
+                # Current time
+                now = datetime.now()
+                
+                # Check if it's time to send the report (30 minutes after sunset)
+                report_time = sunset_time + timedelta(minutes=self.sunset_buffer_minutes)
+                
+                if now >= report_time and now.date() == sunset_time.date():
+                    print("🌇 Sending daily report based on sunset time...")
+                    self.send_daily_report()
+                    self.daily_report_sent_today = True
+                else:
+                    # Sleep until the next check (e.g., 10 minutes)
+                    time_until_next_check = (report_time - now).total_seconds()
+                    if time_until_next_check > 0:
+                        print(f"⏳ Waiting for next report check ({time_until_next_check/60:.1f} minutes)")
+                        time.sleep(min(time_until_next_check, 3600))  # Check again in 10 minutes or less
+                    else:
+                        # If we missed the time, force send the report and reset the flag
+                        print("⚠️ Missed scheduled report time, sending report now")
+                        self.send_daily_report()
+                        self.daily_report_sent_today = True
+            
+            except Exception as e:
+                print(f"❌ Daily report scheduler error: {e}")
+                time.sleep(3600)  # Sleep 1 hour on error
+    
+    def send_daily_report(self):
+        """Send the daily report email"""
+        try:
+            import smtplib
+            from email.mime.text import MIMEText
+            
+            # Load email config
+            config_file = 'email_config.json'
+            if not os.path.exists(config_file):
+                print("⚠️ Email configuration not found, skipping daily report")
+                return
+            
+            with open(config_file, 'r') as f:
+                config = json.load(f)
+            
+            # Get current system data
+            current_data = self.get_current_data()
+            
+            # Get today's power history
+            today_history = self.get_power_history(24)
+            
+            # Calculate comprehensive daily stats
+            if today_history:
+                power_values = [entry['power'] for entry in today_history]
+                max_power = max(power_values)
+                avg_power = sum(power_values) / len(power_values)
+                min_power = min(power_values)
+                
+                # Calculate production hours (power > 0.01 kW)
+                production_entries = [p for p in power_values if p > 0.01]
+                production_hours = len(production_entries) * 0.25  # Each entry represents ~15 min
+                
+                # Check if system is currently producing (for sunset detection)
+                current_power = current_data.get('power_kw', 0)
+                is_currently_producing = current_power > 0.01
+                
+                # Estimate efficiency
+                inverter_efficiency = (current_data.get('active_inverters', 0) / current_data.get('total_inverters', 25)) * 100
+            else:
+                max_power = avg_power = min_power = 0
+                production_hours = 0
+                is_currently_producing = False
+                inverter_efficiency = 0
+            
+            # Determine report timing context
+            current_hour = datetime.now().hour
+            if current_hour >= 20 or current_hour <= 6:
+                timing_note = "📅 End-of-day report"
+            elif not is_currently_producing and current_hour >= 16:
+                timing_note = "🌅 Post-sunset report (solar production complete)"
+            else:
+                timing_note = "☀️ Mid-day report (solar production ongoing)"
+            
+            # Generate comprehensive report
+            report_body = f"""📊 Daily Solar Report - {datetime.now().strftime('%A, %B %d, %Y')}
+{timing_note}
+
+🌞 TODAY'S SOLAR PERFORMANCE:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+⚡ Current Power: {current_data.get('power_kw', 0):.3f} kW
+📈 Peak Power Today: {max_power:.3f} kW  
+📊 Average Power: {avg_power:.3f} kW
+📉 Minimum Power: {min_power:.3f} kW
+🔋 Energy Generated Today: {current_data.get('energy_today_kwh', 0):.2f} kWh
+⏰ Production Hours: {production_hours:.1f} hours
+🏆 Lifetime Energy: {current_data.get('lifetime_energy_mwh', 0):.2f} MWh
+
+🔧 SYSTEM HEALTH & STATUS:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🟢 System Status: {'Online' if current_data.get('is_online') else 'Offline'}
+🔌 Active Inverters: {current_data.get('active_inverters', 0)}/{current_data.get('total_inverters', 25)}
+📊 Inverter Efficiency: {inverter_efficiency:.1f}%
+🏥 Health Status: {current_data.get('health_status', 'Unknown')}
+🕐 Last Data Update: {current_data.get('last_update', 'Unknown')}
+
+📈 DAILY SUMMARY:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+• {'✅ System performed well today' if max_power > 2.0 else '⚠️ Below expected peak performance'}
+• {'✅ All inverters operational' if inverter_efficiency > 95 else f'⚠️ {100-inverter_efficiency:.0f}% inverters may need attention'}
+• {'🌙 Solar production complete for today' if not is_currently_producing and current_hour >= 16 else '☀️ Solar production ongoing'}
+
+🌐 Dashboard: http://localhost:5001
+📧 Report Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+This automated report is sent after solar production ends for the day.
+Configure timing and alerts at: http://localhost:5001/admin
+"""
+            
+            # Send email
+            msg = MIMEText(report_body)
+            report_date = datetime.now().strftime("%m/%d/%Y")
+            energy_summary = f"{current_data.get('energy_today_kwh', 0):.1f}kWh"
+            msg['Subject'] = f'🌞 Daily Solar Report - {report_date} - {energy_summary} Generated'
+            msg['From'] = config['smtp_username']
+            msg['To'] = config['email']
+            
+            print(f"📧 Sending daily report to {config['email']}")
+            print(f"📊 Today's stats: {energy_summary}, Peak: {max_power:.2f}kW, {production_hours:.1f}h production")
+            
+            server = smtplib.SMTP(config['smtp_server'], int(config['smtp_port']))
+            server.starttls()
+            server.login(config['smtp_username'], config['smtp_password'])
+            server.send_message(msg)
+            server.quit()
+            
+            print("✅ Daily report sent successfully!")
+        except Exception as e:
+            error_msg = str(e)
+            print(f"❌ Daily report error: {error_msg}")
 
 
 # Global dashboard instance
@@ -454,6 +868,351 @@ def api_history():
     })
 
 
+@app.route('/admin')
+def admin():
+    """Admin panel for email and alert configuration - server-side rendered"""
+    # Load all configs server-side
+    email_config = {}
+    alert_config = {}
+    imessage_config = {}
+    
+    try:
+        if os.path.exists('email_config.json'):
+            with open('email_config.json', 'r') as f:
+                email_config = json.load(f)
+    except Exception as e:
+        print(f"Error loading email config: {e}")
+    
+    try:
+        if os.path.exists('alert_config.json'):
+            with open('alert_config.json', 'r') as f:
+                alert_config = json.load(f)
+    except Exception as e:
+        print(f"Error loading alert config: {e}")
+    
+    try:
+        if os.path.exists('imessage_config.json'):
+            with open('imessage_config.json', 'r') as f:
+                imessage_config = json.load(f)
+    except Exception as e:
+        print(f"Error loading iMessage config: {e}")
+    
+    # Render template with pre-filled config values
+    return render_template('admin.html', 
+                         email_config=email_config, 
+                         alert_config=alert_config, 
+                         imessage_config=imessage_config)
+
+
+@app.route('/api/admin/email-config', methods=['GET', 'POST'])
+def admin_email_config():
+    """Get or save email configuration"""
+    config_file = 'email_config.json'
+    
+    if request.method == 'POST':
+        try:
+            config = request.json
+            with open(config_file, 'w') as f:
+                json.dump(config, f, indent=2)
+            return jsonify({'success': True})
+        except Exception as e:
+            return jsonify({'success': False, 'error': str(e)})
+    else:
+        try:
+            if os.path.exists(config_file):
+                with open(config_file, 'r') as f:
+                    return jsonify(json.load(f))
+            return jsonify({})
+        except Exception as e:
+            return jsonify({'error': str(e)})
+
+
+@app.route('/api/admin/alert-config', methods=['GET', 'POST'])
+def admin_alert_config():
+    """Get or save alert configuration"""
+    config_file = 'alert_config.json'
+    
+    if request.method == 'POST':
+        try:
+            config = request.json
+            with open(config_file, 'w') as f:
+                json.dump(config, f, indent=2)
+            return jsonify({'success': True})
+        except Exception as e:
+            return jsonify({'success': False, 'error': str(e)})
+    else:
+        try:
+            if os.path.exists(config_file):
+                with open(config_file, 'r') as f:
+                    return jsonify(json.load(f))
+            return jsonify({})
+        except Exception as e:
+            return jsonify({'error': str(e)})
+
+
+@app.route('/api/admin/imessage-config', methods=['GET', 'POST'])
+def admin_imessage_config():
+    """Get or save iMessage configuration"""
+    config_file = 'imessage_config.json'
+    
+    if request.method == 'POST':
+        try:
+            config = request.json
+            with open(config_file, 'w') as f:
+                json.dump(config, f, indent=2)
+            return jsonify({'success': True})
+        except Exception as e:
+            return jsonify({'success': False, 'error': str(e)})
+    else:
+        try:
+            if os.path.exists(config_file):
+                with open(config_file, 'r') as f:
+                    return jsonify(json.load(f))
+            return jsonify({})
+        except Exception as e:
+            return jsonify({'error': str(e)})
+
+
+@app.route('/api/admin/test-email', methods=['POST'])
+def admin_test_email():
+    """Send test email"""
+    try:
+        import smtplib
+        from email.mime.text import MIMEText
+        
+        # Load email config
+        config_file = 'email_config.json'
+        if not os.path.exists(config_file):
+            return jsonify({'success': False, 'error': 'Email not configured'})
+            
+        with open(config_file, 'r') as f:
+            config = json.load(f)
+        
+        # Validate required fields
+        required_fields = ['email', 'smtp_server', 'smtp_port', 'smtp_username', 'smtp_password']
+        for field in required_fields:
+            if not config.get(field):
+                return jsonify({'success': False, 'error': f'Missing {field} in configuration'})
+        
+        # Send test email
+        msg = MIMEText('This is a test email from your Chilicon Dashboard admin panel.')
+        msg['Subject'] = 'Chilicon Dashboard Test Email'
+        msg['From'] = config['smtp_username']
+        msg['To'] = config['email']
+        
+        print(f"📧 Attempting to send email via {config['smtp_server']}:{config['smtp_port']}")
+        
+        server = smtplib.SMTP(config['smtp_server'], int(config['smtp_port']))
+        server.starttls()
+        server.login(config['smtp_username'], config['smtp_password'])
+        server.send_message(msg)
+        server.quit()
+        
+        print("✅ Test email sent successfully!")
+        return jsonify({'success': True})
+    except Exception as e:
+        error_msg = str(e)
+        print(f"❌ Email error: {error_msg}")
+        return jsonify({'success': False, 'error': error_msg})
+
+
+@app.route('/api/admin/test-alerts', methods=['POST'])
+def admin_test_alerts():
+    """Send test alerts for different conditions"""
+    try:
+        import smtplib
+        from email.mime.text import MIMEText
+        
+        # Load email config
+        config_file = 'email_config.json'
+        if not os.path.exists(config_file):
+            return jsonify({'success': False, 'error': 'Email not configured'})
+            
+        with open(config_file, 'r') as f:
+            config = json.load(f)
+        
+        # Load alert config
+        alert_config_file = 'alert_config.json'
+        alert_config = {}
+        if os.path.exists(alert_config_file):
+            with open(alert_config_file, 'r') as f:
+                alert_config = json.load(f)
+        
+        # Validate required fields
+        required_fields = ['email', 'smtp_server', 'smtp_port', 'smtp_username', 'smtp_password']
+        for field in required_fields:
+            if not config.get(field):
+                return jsonify({'success': False, 'error': f'Missing {field} in configuration'})
+        
+        # Get current system data for context
+        current_data = dashboard.get_current_data()
+        
+        # Create test alert messages
+        test_alerts = [
+            {
+                'subject': '🚨 TEST ALERT: Low Power Warning - Chilicon Solar',
+                'body': f'''This is a TEST alert from your Chilicon Solar Dashboard.
+
+ALERT TYPE: Low Power Warning
+THRESHOLD: {alert_config.get('low_power_threshold', 0.5)} kW
+CURRENT POWER: {current_data.get('power_kw', 0):.3f} kW
+ACTIVE INVERTERS: {current_data.get('active_inverters', 0)}/{current_data.get('total_inverters', 25)}
+
+This is a test message to verify your alert system is working properly.
+Your actual power output is currently normal.
+
+Dashboard: http://localhost:5001
+Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}'''
+            },
+            {
+                'subject': '🔌 TEST ALERT: System Offline - Chilicon Solar',
+                'body': f'''This is a TEST alert from your Chilicon Solar Dashboard.
+
+ALERT TYPE: System Offline
+THRESHOLD: {alert_config.get('offline_alert_minutes', 30)} minutes
+SYSTEM STATUS: Online (Test Mode)
+LAST UPDATE: {current_data.get('last_update', 'Unknown')}
+
+This is a test message to verify your alert system is working properly.
+Your system is currently online and functioning normally.
+
+Dashboard: http://localhost:5001
+Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}'''
+            }
+        ]
+        
+        print(f"📧 Sending test alerts to {config['email']}")
+        
+        # Send each test alert
+        server = smtplib.SMTP(config['smtp_server'], int(config['smtp_port']))
+        server.starttls()
+        server.login(config['smtp_username'], config['smtp_password'])
+        
+        for alert in test_alerts:
+            msg = MIMEText(alert['body'])
+            msg['Subject'] = alert['subject']
+            msg['From'] = config['smtp_username']
+            msg['To'] = config['email']
+            
+            server.send_message(msg)
+            print(f"✅ Sent: {alert['subject']}")
+        
+        server.quit()
+        
+        print("✅ All test alerts sent successfully!")
+        return jsonify({'success': True, 'message': f'Sent {len(test_alerts)} test alerts'})
+        
+    except Exception as e:
+        error_msg = str(e)
+        print(f"❌ Test alerts error: {error_msg}")
+        return jsonify({'success': False, 'error': error_msg})
+
+
+@app.route('/api/admin/test-imessage', methods=['POST'])
+def admin_test_imessage():
+    """Send test iMessage"""
+    try:
+        import subprocess
+        
+        # Load iMessage config
+        config_file = 'imessage_config.json'
+        if not os.path.exists(config_file):
+            return jsonify({'success': False, 'error': 'iMessage not configured'})
+            
+        with open(config_file, 'r') as f:
+            config = json.load(f)
+        
+        if not config.get('imessage_enabled'):
+            return jsonify({'success': False, 'error': 'iMessage is disabled'})
+            
+        if not config.get('imessage_phone'):
+            return jsonify({'success': False, 'error': 'No phone number configured'})
+        
+        # Get current system data for context
+        current_data = dashboard.get_current_data()
+        
+        message = f"""🔌 Chilicon Solar Dashboard Test
+
+This is a test message from your solar monitoring system.
+
+Current Status:
+⚡ Power: {current_data.get('power_kw', 0):.3f} kW
+🔋 Active Inverters: {current_data.get('active_inverters', 0)}/{current_data.get('total_inverters', 25)}
+🕐 Time: {datetime.now().strftime('%H:%M:%S')}
+
+System is functioning normally."""
+        
+        phone = config['imessage_phone']
+        
+        # Use AppleScript to send iMessage (macOS only)
+        applescript = f'''
+        tell application "Messages"
+            set targetService to 1st service whose service type = iMessage
+            set targetBuddy to buddy "{phone}" of targetService
+            send "{message}" to targetBuddy
+        end tell
+        '''
+        
+        print(f"📱 Sending test iMessage to {phone}")
+        
+        result = subprocess.run(['osascript', '-e', applescript], 
+                              capture_output=True, text=True)
+        
+        if result.returncode == 0:
+            print("✅ Test iMessage sent successfully!")
+            return jsonify({'success': True})
+        else:
+            error_msg = result.stderr or "Failed to send iMessage"
+            print(f"❌ iMessage error: {error_msg}")
+            return jsonify({'success': False, 'error': error_msg})
+            
+    except Exception as e:
+        error_msg = str(e)
+        print(f"❌ iMessage error: {error_msg}")
+        return jsonify({'success': False, 'error': error_msg})
+
+
+@app.route('/api/admin/send-daily-report', methods=['POST'])
+def admin_send_daily_report():
+    """Generate and send daily status report"""
+    try:
+        result = dashboard._generate_and_send_daily_report()
+        return jsonify(result)
+    except Exception as e:
+        error_msg = str(e)
+        print(f"❌ Daily report error: {error_msg}")
+        return jsonify({'success': False, 'error': error_msg})
+
+
+@app.route('/api/admin/sunset-info', methods=['GET'])
+def admin_sunset_info():
+    """Get sunset time and daily report scheduling information"""
+    try:
+        sunset_time = calculate_sunset_time()
+        report_time = sunset_time + timedelta(minutes=dashboard.sunset_buffer_minutes)
+        current_time = datetime.now()
+        
+        # Calculate next report time
+        if current_time > report_time:
+            # Already passed today's time, next is tomorrow
+            tomorrow_sunset = calculate_sunset_time() + timedelta(days=1)
+            next_report_time = tomorrow_sunset + timedelta(minutes=dashboard.sunset_buffer_minutes)
+        else:
+            next_report_time = report_time
+        
+        return jsonify({
+            'today_sunset': sunset_time.strftime('%H:%M'),
+            'today_report_time': report_time.strftime('%H:%M'),
+            'next_report_time': next_report_time.strftime('%H:%M'),
+            'next_report_date': next_report_time.strftime('%Y-%m-%d'),
+            'buffer_minutes': dashboard.sunset_buffer_minutes,
+            'current_time': current_time.strftime('%H:%M'),
+            'report_sent_today': dashboard.daily_report_sent_today
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)})
+
+
 def run_dashboard(host='0.0.0.0', port=5000, debug=False):
     """Run the dashboard server"""
     print("🌐 Starting Enhanced Chilicon Dashboard...")
@@ -464,4 +1223,4 @@ def run_dashboard(host='0.0.0.0', port=5000, debug=False):
 
 
 if __name__ == "__main__":
-    run_dashboard(port=5001, debug=False)
+    run_dashboard(port=5002, debug=False)
