@@ -66,6 +66,45 @@
             </div>
             <div class="form-group">
                 <label>
+                    <input type="checkbox" id="inverter-alerts-enabled" {{ 'checked' if alert_config.inverter_alerts_enabled else '' }}> Enable Inverter Offline Alerts
+                </label>
+                <small style="color: #666; display: block; margin-top: 5px;">
+                    Alert when inverters go offline during daylight hours (excludes sunset period)
+                </small>
+            </div>
+            <div class="form-group">
+                <label for="min-active-inverters">Minimum Active Inverters (Critical Alert):</label>
+                <input type="number" id="min-active-inverters" placeholder="20" value="{{ alert_config.min_active_inverters or '' }}">
+                <small style="color: #666; display: block; margin-top: 5px;">
+                    Alert when fewer than this many inverters are active during daylight (out of 25 total)
+                </small>
+            </div>
+            <div class="form-group">
+                <label for="max-offline-inverters">Maximum Offline Inverters (Warning):</label>
+                <input type="number" id="max-offline-inverters" placeholder="3" value="{{ alert_config.max_offline_inverters or '' }}">
+                <small style="color: #666; display: block; margin-top: 5px;">
+                    Alert when more than this many detected inverters are offline during daylight
+                </small>
+            </div>
+            <div class="form-group">
+                <label for="sunset-buffer-minutes">Sunset Buffer (minutes):</label>
+                <input type="number" id="sunset-buffer-minutes" placeholder="60" value="{{ alert_config.sunset_buffer_minutes or '' }}">
+                <small style="color: #666; display: block; margin-top: 5px;">
+                    Don't send offline alerts this many minutes before/after sunset
+                </small>
+            </div>
+            <div class="form-group">
+                <label>
+                    <input type="checkbox" id="email-alerts-enabled" {{ 'checked' if alert_config.email_alerts_enabled else '' }}> Send Alerts via Email
+                </label>
+            </div>
+            <div class="form-group">
+                <label>
+                    <input type="checkbox" id="imessage-alerts-enabled" {{ 'checked' if alert_config.imessage_alerts_enabled else '' }}> Send Alerts via iMessage
+                </label>
+            </div>
+            <div class="form-group">
+                <label>
                     <input type="checkbox" id="daily-report-enabled" {{ 'checked' if alert_config.daily_report_enabled else '' }}> Send Daily Status Report
                 </label>
                 <small style="color: #666; display: block; margin-top: 5px;">
@@ -151,7 +190,13 @@
             const config = {
                 low_power_threshold: parseFloat(document.getElementById('low-power-threshold').value),
                 offline_alert_minutes: parseInt(document.getElementById('offline-alert-minutes').value),
-                daily_report_enabled: document.getElementById('daily-report-enabled').checked
+                daily_report_enabled: document.getElementById('daily-report-enabled').checked,
+                inverter_alerts_enabled: document.getElementById('inverter-alerts-enabled').checked,
+                min_active_inverters: parseInt(document.getElementById('min-active-inverters').value),
+                max_offline_inverters: parseInt(document.getElementById('max-offline-inverters').value),
+                sunset_buffer_minutes: parseInt(document.getElementById('sunset-buffer-minutes').value),
+                email_alerts_enabled: document.getElementById('email-alerts-enabled').checked,
+                imessage_alerts_enabled: document.getElementById('imessage-alerts-enabled').checked
             };
             
             fetch('/api/admin/alert-config', {

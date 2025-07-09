@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 from flask import Flask, render_template, jsonify, request
 from legacy_chilicon_monitor import ChiliconLegacyMonitor
 from final_microinverter_extractor import MicroinverterPowerExtractor
+from inverter_alert_manager import InverterAlertManager
 import math
 
 app = Flask(__name__)
@@ -114,6 +115,9 @@ class EnhancedDashboard:
         self.daily_report_sent_today = False
         self.last_daily_report_date = None
         self.sunset_buffer_minutes = 30  # Wait 30 minutes after sunset
+        
+        # Initialize intelligent alert manager
+        self.alert_manager = InverterAlertManager()
         
         # Start background data updating
         self.monitoring = True
@@ -523,6 +527,12 @@ Next report will be sent tomorrow after sunset (~{(sunset_time + timedelta(days=
                     
                     print(f"✅ Updated individual inverters with detailed data: "
                           f"{active_count}/25 active")
+                    
+                    # Check for alerts after updating inverter data
+                    try:
+                        self.alert_manager.check_and_send_alerts(detailed_stats)
+                    except Exception as e:
+                        print(f"⚠️ Alert checking failed: {e}")
                 else:
                     print("⚠️ Could not fetch detailed inverter analysis")
                     # Only use legacy data as absolute fallback

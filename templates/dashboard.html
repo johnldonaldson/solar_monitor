@@ -3,7 +3,10 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>🔌 Chilicon Solar Dashboard</title>
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
+    <title>🔌 Chilicon Solar Dashboard - Updated</title>
     <style>
         * {
             margin: 0;
@@ -336,6 +339,7 @@
         <div class="header">
             <h1>🔌 Chilicon Solar Dashboard</h1>
             <p>Real-time monitoring of your solar power system</p>
+            <p id="page-timestamp" style="font-size: 12px; opacity: 0.8;"></p>
             <a href="/admin" style="display: inline-block; margin-top: 15px; padding: 10px 20px; background: rgba(255,255,255,0.2); color: white; text-decoration: none; border-radius: 25px; border: 2px solid rgba(255,255,255,0.3); font-size: 14px; transition: all 0.3s ease;">⚙️ Admin Panel</a>
         </div>
         
@@ -441,6 +445,10 @@
         
         // Initialize dashboard
         document.addEventListener('DOMContentLoaded', function() {
+            // Set page load timestamp
+            document.getElementById('page-timestamp').textContent = 
+                `Page loaded: ${new Date().toLocaleString()}`;
+                
             initializePowerChart();
             updateDashboard();
             
@@ -573,6 +581,8 @@
             // Update inverter counts
             const active = data.active_inverters || 0;
             const total = data.total_inverters || 25;
+            
+            console.log('Updating inverter counts:', { active, total, data });
             
             document.getElementById('active-inverters').textContent = active;
             document.getElementById('total-inverters').textContent = total;
@@ -727,7 +737,8 @@ Peak Time: ${stats.peak_time}`;
                     const totalCurrent = stats.reduce((sum, s) => sum + s.current_power, 0);
                     const totalMax = stats.reduce((sum, s) => sum + s.max_power, 0);
                     const activeCount = stats.filter(s => s.current_power > 0.01).length;
-                    const efficiency = (activeCount / stats.length * 100).toFixed(1);
+                    const totalInverters = 25; // Known system total, not just detected
+                    const efficiency = (activeCount / totalInverters * 100).toFixed(1);
                     
                     // Create HTML
                     let html = `
@@ -743,7 +754,7 @@ Peak Time: ${stats.peak_time}`;
                                     <div class="overview-label">Peak Power (kW)</div>
                                 </div>
                                 <div class="overview-metric">
-                                    <div class="overview-value">${activeCount}/${stats.length}</div>
+                                    <div class="overview-value">${activeCount}/${totalInverters}</div>
                                     <div class="overview-label">Active Inverters</div>
                                 </div>
                                 <div class="overview-metric">

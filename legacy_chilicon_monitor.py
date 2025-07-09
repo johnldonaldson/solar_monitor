@@ -288,7 +288,7 @@ class ChiliconLegacyMonitor:
                 inactive = [v for v in values if v <= 5]   # Inactive/low inverters
                 
                 print(f"🎯 Best matching array: {best_array['id']} (Total: {best_array['total']:.1f}W)")
-                print(f"🔋 Active inverters: {len(producing)}/{len(values)}")
+                print(f"🔋 Active inverters: {len(producing)}/25 ({len(values)} detected)")
                 print(f"⚠️  Inactive/low inverters: {len(inactive)}")
                 
                 # Map serials to power values (if we have enough serials)
@@ -339,9 +339,11 @@ class ChiliconLegacyMonitor:
                 
                 return {
                     'array_id': best_array['id'],
-                    'total_inverters': len(values),
+                    'total_inverters': 25,  # Known system total, not just detected
+                    'detected_inverters': len(values),  # Actually detected count
                     'active_inverters': len(producing),
                     'inactive_inverters': len(inactive),
+                    'missing_inverters': 25 - len(values),  # Not detected
                     'individual_powers': values,
                     'producing_powers': producing,
                     'inverter_serials': inverter_serials,
@@ -393,10 +395,27 @@ class ChiliconLegacyMonitor:
                 issues.append(f"{underperforming} underperforming inverters")
             
             # Check for completely inactive units during production hours
-            if inactive > 2 and active > 10:  # During production with multiple active
+            # Include both detected inactive and missing inverters
+            total_non_active = total - active  # All non-active (inactive + missing)
+            missing = inverter_data.get('missing_inverters', 0)
+            
+            # Only downgrade if we have a significant number of non-active units
+            # and the activity rate is already borderline
+            if total_non_active > 4 and active > 10 and activity_rate < 0.90:
                 if health_status in ["🟢 EXCELLENT", "🟡 GOOD"]:
                     health_status = "🔶 FAIR"
-                issues.append(f"{inactive} completely inactive inverters")
+                if missing > 0:
+                    issues.append(f"{total_non_active} inverters not active "
+                                f"({inactive} inactive, {missing} missing)")
+                else:
+                    issues.append(f"{total_non_active} completely inactive inverters")
+            elif total_non_active > 2:
+                # Just add to issues but don't downgrade status for 2-4 non-active
+                if missing > 0:
+                    issues.append(f"{total_non_active} inverters not active "
+                                f"({inactive} inactive, {missing} missing)")
+                else:
+                    issues.append(f"{total_non_active} completely inactive inverters")
             
             return {
                 'health_status': health_status,
