@@ -1246,89 +1246,85 @@ def admin_test_email():
 
 @app.route('/api/admin/test-alerts', methods=['POST'])
 def admin_test_alerts():
-    """Send test alerts for different conditions"""
+    """Send test alerts using the intelligent alerting system with user's delivery preferences"""
     try:
-        import smtplib
-        from email.mime.text import MIMEText
-        
-        # Load email config
-        config_file = 'email_config.json'
-        if not os.path.exists(config_file):
-            return jsonify({'success': False, 'error': 'Email not configured'})
-            
-        with open(config_file, 'r') as f:
-            config = json.load(f)
-        
-        # Load alert config
+        # Load alert configuration
         alert_config_file = 'alert_config.json'
-        alert_config = {}
-        if os.path.exists(alert_config_file):
-            with open(alert_config_file, 'r') as f:
-                alert_config = json.load(f)
+        if not os.path.exists(alert_config_file):
+            return jsonify({'success': False, 'error': 'Alert configuration not found'})
+            
+        with open(alert_config_file, 'r') as f:
+            alert_config = json.load(f)
         
-        # Validate required fields
-        required_fields = ['email', 'smtp_server', 'smtp_port', 'smtp_username', 'smtp_password']
-        for field in required_fields:
-            if not config.get(field):
-                return jsonify({'success': False, 'error': f'Missing {field} in configuration'})
+        # Check if alerts are enabled
+        if not alert_config.get('inverter_alerts_enabled', True):
+            return jsonify({'success': False, 'error': 'Inverter alerts are disabled'})
+        
+        # Determine delivery methods based on user preferences
+        delivery_methods = []
+        if alert_config.get('email_alerts_enabled', True):
+            delivery_methods.append('email')
+        if alert_config.get('imessage_alerts_enabled', True):
+            delivery_methods.append('imessage')
+        
+        if not delivery_methods:
+            return jsonify({'success': False, 'error': 'No alert delivery methods enabled'})
         
         # Get current system data for context
         current_data = dashboard.get_current_data()
         
-        # Create test alert messages
+        # Create test alerts using the intelligent alerting system
         test_alerts = [
             {
-                'subject': '🚨 TEST ALERT: Low Power Warning - Chilicon Solar',
-                'body': f'''This is a TEST alert from your Chilicon Solar Dashboard.
-
-ALERT TYPE: Low Power Warning
-THRESHOLD: {alert_config.get('low_power_threshold', 0.5)} kW
-CURRENT POWER: {current_data.get('power_kw', 0):.3f} kW
-ACTIVE INVERTERS: {current_data.get('active_inverters', 0)}/{current_data.get('total_inverters', 25)}
-
-This is a test message to verify your alert system is working properly.
-Your actual power output is currently normal.
-
-Dashboard: http://localhost:5001
-Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}'''
+                'type': 'test_low_active',
+                'severity': 'WARNING',
+                'message': f"TEST ALERT: Only 18/25 inverters active (below threshold of {alert_config.get('min_active_inverters', 20)})",
+                'active_count': 18,
+                'total_count': 25,
+                'timestamp': datetime.now().isoformat(),
+                'timing_context': f"Test alert generated at {datetime.now().strftime('%H:%M')} (manual test)"
             },
             {
-                'subject': '🔌 TEST ALERT: System Offline - Chilicon Solar',
-                'body': f'''This is a TEST alert from your Chilicon Solar Dashboard.
-
-ALERT TYPE: System Offline
-THRESHOLD: {alert_config.get('offline_alert_minutes', 30)} minutes
-SYSTEM STATUS: Online (Test Mode)
-LAST UPDATE: {current_data.get('last_update', 'Unknown')}
-
-This is a test message to verify your alert system is working properly.
-Your system is currently online and functioning normally.
-
-Dashboard: http://localhost:5001
-Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}'''
+                'type': 'test_offline',
+                'severity': 'WARNING', 
+                'message': f"TEST ALERT: {alert_config.get('max_offline_inverters', 3) + 1} detected inverters offline: 90F00179, 90F0015C, 90F00188, 90F00170",
+                'offline_count': alert_config.get('max_offline_inverters', 3) + 1,
+                'offline_serials': ['90F00179', '90F0015C', '90F00188', '90F00170'],
+                'timestamp': datetime.now().isoformat(),
+                'timing_context': f"Test alert generated at {datetime.now().strftime('%H:%M')} (manual test)"
             }
         ]
         
-        print(f"📧 Sending test alerts to {config['email']}")
+        print(f"� Sending test alerts via: {', '.join(delivery_methods)}")
         
-        # Send each test alert
-        server = smtplib.SMTP(config['smtp_server'], int(config['smtp_port']))
-        server.starttls()
-        server.login(config['smtp_username'], config['smtp_password'])
-        
+        # Use the intelligent alert manager to send alerts
+        results = []
         for alert in test_alerts:
-            msg = MIMEText(alert['body'])
-            msg['Subject'] = alert['subject']
-            msg['From'] = config['smtp_username']
-            msg['To'] = config['email']
+            alert_results = dashboard.alert_manager.send_inverter_alert(alert, delivery_methods)
+            results.extend(alert_results)
+        
+        # Count successful deliveries
+        successful_deliveries = []
+        failed_deliveries = []
+        
+        for method, result in results:
+            if result.get('success'):
+                successful_deliveries.append(method)
+            else:
+                failed_deliveries.append(f"{method}: {result.get('error', 'Unknown error')}")
+        
+        # Prepare response
+        if successful_deliveries:
+            success_msg = f"Test alerts sent successfully via: {', '.join(successful_deliveries)}"
+            if failed_deliveries:
+                success_msg += f". Failed: {', '.join(failed_deliveries)}"
             
-            server.send_message(msg)
-            print(f"✅ Sent: {alert['subject']}")
-        
-        server.quit()
-        
-        print("✅ All test alerts sent successfully!")
-        return jsonify({'success': True, 'message': f'Sent {len(test_alerts)} test alerts'})
+            print(f"✅ {success_msg}")
+            return jsonify({'success': True, 'message': success_msg})
+        else:
+            error_msg = f"All test alerts failed: {', '.join(failed_deliveries)}"
+            print(f"❌ {error_msg}")
+            return jsonify({'success': False, 'error': error_msg})
         
     except Exception as e:
         error_msg = str(e)
