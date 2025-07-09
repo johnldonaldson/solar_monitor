@@ -924,6 +924,10 @@ Configure timing and alerts at: http://localhost:5001/admin
                 -1863319078: '90F001DA',  # Position 22
                 -1863319180: '90F00174',  # Position 23
                 -1863319171: '90F0017D',  # Position 24
+                # Additional inverters found in Chilicon data
+                1093666578: '41300712',   # New hex format inverter
+                -1053817559: '3ECFFAD7',  # Negative ID format
+                3241149737: 'C1300529',   # Missing inverter from Chilicon site
             }
             
             # Create session with proper headers
