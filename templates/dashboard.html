@@ -6,7 +6,7 @@
     <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
-    <title>🔌 Chilicon Solar Dashboard - Updated</title>
+    <title>🔌 Chilicon Solar Dashboard - v2.1 (Timing Added)</title>
     <style>
         * {
             margin: 0;
@@ -340,6 +340,7 @@
             <h1>🔌 Chilicon Solar Dashboard</h1>
             <p>Real-time monitoring of your solar power system</p>
             <p id="page-timestamp" style="font-size: 12px; opacity: 0.8;"></p>
+            <p id="chilicon-timing" style="font-size: 12px; opacity: 0.8; margin-top: 5px;"></p>
             <a href="/admin" style="display: inline-block; margin-top: 15px; padding: 10px 20px; background: rgba(255,255,255,0.2); color: white; text-decoration: none; border-radius: 25px; border: 2px solid rgba(255,255,255,0.3); font-size: 14px; transition: all 0.3s ease;">⚙️ Admin Panel</a>
         </div>
         
@@ -547,6 +548,16 @@
                 const updateTime = new Date(data.last_update);
                 document.getElementById('last-update').textContent = 
                     `Last updated: ${updateTime.toLocaleTimeString()}`;
+            }
+            
+            // Update Chilicon communication timing
+            if (data.cache_info) {
+                const cacheInfo = data.cache_info;
+                const lastComm = cacheInfo.last_update_formatted || 'Unknown';
+                const nextUpdate = cacheInfo.next_update_minutes || 0;
+                
+                document.getElementById('chilicon-timing').textContent = 
+                    `Last Chilicon sync: ${lastComm} | Next update in ${nextUpdate.toFixed(1)} min`;
             }
         }
         
