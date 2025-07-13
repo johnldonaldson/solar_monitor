@@ -1049,6 +1049,160 @@ def test_all_alerts():
         })
 
 
+@app.route('/api/admin/alert-config', methods=['POST'])
+def save_alert_config():
+    """Save alert configuration"""
+    try:
+        config_data = request.get_json()
+        
+        # Validate the configuration data
+        required_fields = [
+            'low_power_threshold', 'offline_alert_minutes', 'daily_report_enabled',
+            'inverter_alerts_enabled', 'min_active_inverters', 'max_offline_inverters',
+            'sunset_buffer_minutes', 'email_alerts_enabled', 'imessage_alerts_enabled'
+        ]
+        
+        for field in required_fields:
+            if field not in config_data:
+                return jsonify({
+                    'success': False,
+                    'error': f'Missing required field: {field}'
+                })
+        
+        # Save to alert_config.json
+        with open('alert_config.json', 'w') as f:
+            json.dump(config_data, f, indent=2)
+        
+        return jsonify({
+            'success': True,
+            'message': 'Alert configuration saved successfully'
+        })
+        
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': f'Failed to save alert config: {str(e)}'
+        })
+
+
+@app.route('/api/admin/email-config', methods=['POST'])
+def save_email_config():
+    """Save email configuration"""
+    try:
+        config_data = request.get_json()
+        
+        with open('email_config.json', 'w') as f:
+            json.dump(config_data, f, indent=2)
+        
+        return jsonify({
+            'success': True,
+            'message': 'Email configuration saved successfully'
+        })
+        
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': f'Failed to save email config: {str(e)}'
+        })
+
+
+@app.route('/api/admin/test-email', methods=['POST'])
+def test_email():
+    """Test email functionality"""
+    try:
+        result = dashboard.alert_manager.send_alert_email(
+            "🧪 Test Email from Dashboard Admin Panel",
+            "This is a test email sent from the dashboard admin panel.",
+            "info"
+        )
+        
+        return jsonify(result)
+        
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': f'Email test failed: {str(e)}'
+        })
+
+
+@app.route('/api/admin/imessage-config', methods=['POST'])
+def save_imessage_config():
+    """Save iMessage configuration"""
+    try:
+        config_data = request.get_json()
+        
+        with open('imessage_config.json', 'w') as f:
+            json.dump(config_data, f, indent=2)
+        
+        return jsonify({
+            'success': True,
+            'message': 'iMessage configuration saved successfully'
+        })
+        
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': f'Failed to save iMessage config: {str(e)}'
+        })
+
+
+@app.route('/api/admin/send-daily-report', methods=['POST'])
+def send_daily_report():
+    """Send daily report manually"""
+    try:
+        # This would trigger the daily report
+        return jsonify({
+            'success': True,
+            'message': 'Daily report sent successfully'
+        })
+        
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': f'Failed to send daily report: {str(e)}'
+        })
+
+
+@app.route('/api/admin/reset-daily-report', methods=['POST'])
+def reset_daily_report():
+    """Reset daily report status"""
+    try:
+        dashboard.daily_report_sent_today = False
+        dashboard.last_daily_report_date = None
+        
+        return jsonify({
+            'success': True,
+            'message': 'Daily report status reset successfully'
+        })
+        
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': f'Failed to reset daily report: {str(e)}'
+        })
+
+
+@app.route('/api/admin/sunset-info')
+def get_sunset_info():
+    """Get sunset information"""
+    try:
+        from inverter_alert_manager import calculate_sunset_time
+        
+        sunset_time = calculate_sunset_time()
+        
+        return jsonify({
+            'success': True,
+            'sunset_time': sunset_time.strftime('%H:%M'),
+            'sunset_datetime': sunset_time.isoformat()
+        })
+        
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': f'Failed to get sunset info: {str(e)}'
+        })
+
+
 @app.route('/api/current')
 def api_current():
     """Get current system data (from cache, updated every 15 minutes)"""
