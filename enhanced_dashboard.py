@@ -4,16 +4,21 @@ Enhanced Chilicon Power Dashboard
 Real-time dashboard with direct data fetching
 """
 
-import time
-import threading
-import json
 import os
+import json
+import math
+import time
+import statistics
+import threading
+import traceback
+import smtplib
+import subprocess
+import requests
 from datetime import datetime, timedelta
 from flask import Flask, render_template, jsonify, request
 from legacy_chilicon_monitor import ChiliconLegacyMonitor
 from final_microinverter_extractor import MicroinverterPowerExtractor
 from inverter_alert_manager import InverterAlertManager
-import math
 
 app = Flask(__name__)
 
@@ -25,7 +30,6 @@ def calculate_sunset_time(latitude=37.7749, longitude=-122.4194):
     """
     try:
         from datetime import date
-        import math
         
         # Julian day calculation
         today = date.today()
@@ -119,6 +123,15 @@ class EnhancedDashboard:
         # Initialize intelligent alert manager
         self.alert_manager = InverterAlertManager()
         
+        # Debug tracking
+        self.debug_info = {
+            'thread_start_time': datetime.now().isoformat(),
+            'iteration_count': 0,
+            'last_operation': 'initialization',
+            'last_operation_time': datetime.now().isoformat(),
+            'errors': []
+        }
+        
         # Start background data updating
         self.monitoring = True
         self.update_thread = threading.Thread(target=self.background_update)
@@ -131,34 +144,133 @@ class EnhancedDashboard:
         self.daily_report_thread.start()
     
     def background_update(self):
-        """Background thread to update data every 15 minutes ONLY"""
+        """Background thread to update data every 15 minutes ONLY with debug logging"""
         print("🔄 Starting background data update thread...")
         print("⚠️ Website access limited to every 15 minutes to avoid blocking")
+        print("🛡️ Process resilience: Using caffeinate and error recovery")
+        
         update_count = 0
+        startup_time = datetime.now()
+        consecutive_errors = 0
+        max_consecutive_errors = 3
+        
         while self.monitoring:
             try:
-                current_time = datetime.now().strftime('%H:%M:%S')
+                current_time = datetime.now()
                 update_count += 1
-                print(f"🕐 {current_time} - Update #{update_count}")
                 
-                # Only fetch data if it's time (first time or after 15 minutes)
-                if self._should_fetch_from_website():
+                # Update debug info
+                self.debug_info.update({
+                    'iteration_count': update_count,
+                    'last_iteration_time': current_time.isoformat(),
+                    'last_operation': 'iteration_start',
+                    'last_operation_time': current_time.isoformat()
+                })
+                
+                # Debug logging
+                print(f"🕐 {current_time.strftime('%H:%M:%S')} - Update #{update_count}")
+                print(f"📊 Thread alive: {threading.current_thread().is_alive()}")
+                print(f"🔄 Monitoring flag: {self.monitoring}")
+                
+                # Check if we should fetch from website
+                self.debug_info['last_operation'] = 'checking_should_fetch'
+                should_fetch = self._should_fetch_from_website()
+                print(f"🌐 Should fetch from website: {should_fetch}")
+                
+                if should_fetch:
+                    self.debug_info['last_operation'] = 'fetching_from_website'
                     print("🌐 Time for fresh data fetch from website...")
-                    if self._fetch_from_website():
+                    print("🔐 Starting login process...")
+                    
+                    fetch_success = self._fetch_from_website()
+                    
+                    if fetch_success:
                         print("✅ Data fetched successfully")
+                        print(f"📊 Current power: {self.current_data.get('power_kw', 0):.3f} kW")
+                        print(f"🔌 Active inverters: {self.current_data.get('active_inverters', 0)}/{self.current_data.get('total_inverters', 25)}")
+                        self.debug_info['last_successful_fetch'] = current_time.isoformat()
                     else:
                         print("❌ Data fetch failed, will retry in 15 minutes")
+                        self.debug_info['last_failed_fetch'] = current_time.isoformat()
                 else:
                     time_until_next = self._time_until_next_fetch()
                     print(f"📋 Using cached data. Next fetch in {time_until_next} minutes")
+                    
+                    # Debug cache info
+                    if self.current_data.get('last_update'):
+                        try:
+                            last_update = datetime.fromisoformat(self.current_data['last_update'])
+                            age_minutes = (current_time - last_update).total_seconds() / 60
+                            print(f"📊 Cache age: {age_minutes:.1f} minutes")
+                        except:
+                            print("📊 Cache age: Unable to calculate")
                 
                 print("✅ Update cycle complete. Next check in 15 minutes.")
-                time.sleep(900)  # Sleep 15 minutes (900 seconds)
+                print(f"⏰ Uptime: {(current_time - startup_time).total_seconds()/60:.1f} minutes")
+                print("💤 Sleeping for 15 minutes...")
+                
+                # Simple, reliable 15-minute sleep with heartbeat
+                self.debug_info['last_operation'] = 'sleeping'
+                sleep_start = datetime.now()
+                self.debug_info['sleep_start_time'] = sleep_start.isoformat()
+                target_sleep_seconds = 900  # 15 minutes
+                
+                print(f"   💤 Sleeping for 15 minutes until {(sleep_start + timedelta(seconds=target_sleep_seconds)).strftime('%H:%M:%S')}")
+                
+                # Sleep in 60-second chunks with heartbeat to prevent system termination
+                elapsed_seconds = 0
+                while elapsed_seconds < target_sleep_seconds and self.monitoring:
+                    time.sleep(60)  # Sleep 1 minute at a time
+                    elapsed_seconds += 60
+                    
+                    # Heartbeat every 5 minutes to show we're alive
+                    if elapsed_seconds % 300 == 0:  # Every 5 minutes
+                        elapsed_minutes = elapsed_seconds / 60
+                        remaining_minutes = (target_sleep_seconds - elapsed_seconds) / 60
+                        print(f"   💓 Heartbeat: {elapsed_minutes:.0f}m elapsed, {remaining_minutes:.0f}m remaining")
+                        
+                        # Update debug info
+                        self.debug_info.update({
+                            'last_operation_time': datetime.now().isoformat(),
+                            'sleep_progress': f"{elapsed_minutes:.0f}m/{remaining_minutes:.0f}m remaining"
+                        })
+                
+                # Reset error counter on successful cycle
+                consecutive_errors = 0
+                    
             except Exception as e:
-                print(f"❌ Background update error: {e}")
-                import traceback
+                consecutive_errors += 1
+                error_msg = f"Background update error: {e}"
+                print(f"❌ {error_msg} (Error #{consecutive_errors})")
                 traceback.print_exc()
-                time.sleep(900)
+                
+                # Track errors in debug info
+                self.debug_info['errors'].append({
+                    'error': error_msg,
+                    'timestamp': datetime.now().isoformat(),
+                    'iteration': update_count,
+                    'consecutive_errors': consecutive_errors
+                })
+                
+                # Keep only last 10 errors
+                if len(self.debug_info['errors']) > 10:
+                    self.debug_info['errors'] = self.debug_info['errors'][-10:]
+                
+                self.debug_info['last_operation'] = 'error_recovery'
+                
+                # Exponential backoff for consecutive errors
+                if consecutive_errors >= max_consecutive_errors:
+                    print(f"⚠️ Too many consecutive errors ({consecutive_errors}). Extended sleep (30 minutes)...")
+                    time.sleep(1800)  # 30 minutes
+                    consecutive_errors = 0  # Reset after extended sleep
+                else:
+                    sleep_duration = min(900, 300 * consecutive_errors)  # 5min, 10min, 15min
+                    print(f"⚠️ Sleeping {sleep_duration/60:.0f} minutes before retry...")
+                    time.sleep(sleep_duration)
+        
+        print("🛑 Background update thread stopped")
+        self.debug_info['thread_stop_time'] = datetime.now().isoformat()
+        self.debug_info['last_operation'] = 'thread_stopped'
     
     def _should_fetch_from_website(self):
         """Check if we should fetch from website (only every 15 minutes)"""
@@ -356,8 +468,8 @@ class EnhancedDashboard:
 🔋 Daily Performance: {'✅ Good' if current_data.get('energy_today_kwh', 0) > 10 else '⚠️ Low production'}
 🔧 System Health: {'✅ All systems nominal' if current_data.get('active_inverters', 0) >= 20 else '⚠️ Some inverters offline'}
 
-🌐 Dashboard: http://localhost:5001
-⚙️ Configure alerts: http://localhost:5001/admin
+🌐 Dashboard: http://localhost:5002
+⚙️ Configure alerts: http://localhost:5002/admin
 📅 Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -414,17 +526,14 @@ Next report will be sent tomorrow after sunset (~{(sunset_time + timedelta(days=
                 })
                 
                 # Only add to power history if we got valid data
-                # This prevents false zero readings during login failures
                 current_time = datetime.now()
                 power_value = self.current_data['power_kw']
                 
-                # Only record if we have a successful data fetch
-                # Don't record zeros during system login failures
                 self.power_history.append({
                     'time': current_time.strftime('%H:%M'),
                     'power': power_value,
                     'timestamp': current_time.isoformat(),
-                    'data_source': 'success'  # Mark as successful data fetch
+                    'data_source': 'success'
                 })
                 
                 # Keep only last 24 hours
@@ -459,18 +568,15 @@ Next report will be sent tomorrow after sunset (~{(sunset_time + timedelta(days=
                             health.get('health_status', 'Unknown')
                         )
                         self.current_data['alerts'] = health.get('issues', [])
+                
                 # Fetch detailed individual inverter analysis data
-                print("� Fetching detailed individual inverter analysis...")
+                print("🔍 Fetching detailed individual inverter analysis...")
                 detailed_stats = self._fetch_individual_inverter_data()
                 if detailed_stats:
-                    self.current_data['detailed_inverter_stats'] = (
-                        detailed_stats
-                    )
-                    print(f"✅ Detailed analysis: {len(detailed_stats)} "
-                          f"inverters analyzed")
+                    self.current_data['detailed_inverter_stats'] = detailed_stats
+                    print(f"✅ Detailed analysis: {len(detailed_stats)} inverters analyzed")
                     
                     # Convert detailed stats to individual_inverters format for compatibility
-                    # Keep power values in kW (don't multiply by 1000)
                     converted_inverters = []
                     for i, stats in enumerate(detailed_stats):
                         converted_inverters.append({
@@ -490,410 +596,38 @@ Next report will be sent tomorrow after sunset (~{(sunset_time + timedelta(days=
                     # Update active inverters count from new data
                     active_count = len([s for s in detailed_stats if s['current_power'] > 0.01])
                     self.current_data['active_inverters'] = active_count
-                     # Recalculate health status using accurate detailed data
-                    # Use total inverters from system (25) not just detailed stats count
-                    total_inverters = self.current_data.get('total_inverters', 25)
-                    updated_inverter_data = {
-                        'total_inverters': total_inverters,
-                        'active_inverters': active_count,
-                        'inactive_inverters': (
-                            total_inverters - active_count
-                        ),
-                        'underperforming_count': 0,  # Calculated by health check
-                        'individual_powers': (
-                            [s['current_power'] for s in detailed_stats]
-                        ),
-                        'producing_powers': [
-                            s['current_power'] for s in detailed_stats
-                            if s['current_power'] > 0.01
-                        ]
-                    }
+                    print(f"✅ Updated individual inverters: {active_count}/25 active")
                     
-                    # Update health status with accurate data
-                    health = monitor.check_inverter_health(updated_inverter_data)
-                    if health:
-                        self.current_data['health_status'] = (
-                            health.get('health_status', 'Unknown')
-                        )
-                        self.current_data['alerts'] = health.get('issues', [])
-                        activity_rate = (
-                            (active_count / total_inverters) * 100 
-                            if total_inverters > 0 else 0
-                        )
-                        status = health.get('health_status', 'Unknown')
-                        print(f"🏥 Health Status: {status} "
-                              f"({active_count}/{total_inverters} active = "
-                              f"{activity_rate:.1f}%)")
-                    
-                    print(f"✅ Updated individual inverters with detailed data: "
-                          f"{active_count}/25 active")
-                    
-                    # Check for alerts after updating inverter data
+                    # *** MISSING ALERT CHECK - ADD THIS ***
+                    # Check for alerts after getting detailed stats
+                    print("🚨 Checking for inverter alerts...")
                     try:
                         self.alert_manager.check_and_send_alerts(detailed_stats)
+                        print("✅ Alert check completed")
                     except Exception as e:
-                        print(f"⚠️ Alert checking failed: {e}")
+                        print(f"❌ Alert check failed: {e}")
                 else:
                     print("⚠️ Could not fetch detailed inverter analysis")
-                    # Only use legacy data as absolute fallback
-                    print("🔄 Attempting legacy data extraction as fallback...")
-                    individual_power_data = (
-                        self.microinverter_extractor.extract_individual_power()
-                    )
-                    
-                    if individual_power_data:
-                        detailed_inverters = (
-                            self.microinverter_extractor
-                            .get_detailed_inverter_data()
-                        )
-                        self.current_data['individual_inverters'] = detailed_inverters
-                        self.current_data['active_inverters'] = individual_power_data['active_inverters']
-                        print("⚠️ Using legacy fallback data")
-                    else:
-                        print("❌ Both detailed and legacy data fetch failed")
-                
-                power_kw = self.current_data['power_kw']
-                active_inv = self.current_data['active_inverters']
-                total_inv = self.current_data['total_inverters']
-                print(f"✅ Website data: {power_kw:.3f} kW, "
-                      f"{active_inv}/{total_inv} inverters")
-                print("⏰ Next website access in 15 minutes")
                 
                 return True
             else:
                 print("❌ Failed to get power data - login or connection issue")
-                # Mark system as temporarily offline but don't record zero power
                 self.current_data.update({
                     'is_online': False,
                     'last_update': datetime.now().isoformat(),
                     'connection_error': True
                 })
-                # Do NOT add power history entry for failed connections
-                # This prevents false zero readings in the power graph
                 return False
                 
         except Exception as e:
             print(f"❌ Website fetch error: {e}")
             return False
-    
-    def _map_inverter_serials(self, inverter_map):
-        """Map inverter positions to actual hex serial numbers"""
-        # Mapping from position to actual hex serial numbers
-        position_to_serial = {
-            0: '90F00179',   # ID: -1863319175
-            1: '90F00170',   # ID: -1863319184
-            2: '90F00173',   # ID: -1863319181
-            3: '90F00188',   # ID: -1863319160
-            4: '90F0015C',   # ID: -1863319204
-            5: 'Unknown_6',  # No mapping available
-            6: '90F00199',   # ID: -1863319143
-            7: '90F0017B',   # ID: -1863319173
-            8: '90F0016C',   # ID: -1863319188
-            9: '90F00167',   # ID: -1863319193
-            10: '90F001B1',  # ID: -1863319119
-            11: '90F00185',  # ID: -1863319163
-            12: '90F001B6',  # ID: -1863319114
-            13: '90F00180',  # ID: -1863319168
-            14: '90F0017A',  # ID: -1863319174
-            15: '90F0017F',  # ID: -1863319169
-            16: '90F001AF',  # ID: -1863319121
-            17: '90F00187',  # ID: -1863319161
-            18: '90F0017E',  # ID: -1863319170
-            19: '90F00175',  # ID: -1863319179
-            20: 'Unknown_21',  # No mapping available
-            21: '90F001AD',  # ID: -1863319123
-            22: '90F001DA',  # ID: -1863319078
-            23: '90F00174',  # ID: -1863319180
-            24: '90F0017D',  # ID: -1863319171
-        }
-        
-        # Update the inverter map with actual serial numbers
-        mapped_inverters = []
-        for inverter in inverter_map:
-            position = inverter.get('index', -1)
-            actual_serial = position_to_serial.get(
-                position, inverter.get('serial', 'Unknown')
-            )
-            
-            # Create updated inverter entry
-            mapped_inverter = {
-                'index': position,
-                'serial': actual_serial,
-                'power_w': inverter.get('power_w', 0),
-                'status': inverter.get('status', 'Unknown')
-            }
-            mapped_inverters.append(mapped_inverter)
-        
-        return mapped_inverters
-
-    def get_current_data(self):
-        """Get current system data"""
-        return self.current_data.copy()
-    
-    def get_power_history(self, hours=24):
-        """Get power history for charts"""
-        cutoff_time = datetime.now() - timedelta(hours=hours)
-        
-        recent_history = []
-        for entry in self.power_history:
-            try:
-                entry_time = datetime.fromisoformat(entry['timestamp'])
-                if entry_time >= cutoff_time:
-                    recent_history.append({
-                        'time': entry['time'],
-                        'power': entry['power']
-                    })
-            except Exception:
-                continue
-
-        return recent_history
-    
-    def _load_power_history(self):
-        """Load power history from cache file"""
-        try:
-            if os.path.exists(self.power_history_file):
-                with open(self.power_history_file, 'r') as f:
-                    data = json.load(f)
-                    self.power_history = data.get('power_history', [])
-                    
-                    # Clean old entries (older than 24 hours)
-                    cutoff_time = datetime.now() - timedelta(hours=24)
-                    self.power_history = [
-                        entry for entry in self.power_history
-                        if datetime.fromisoformat(
-                            entry['timestamp']
-                        ) > cutoff_time
-                    ]
-                    print(f"📊 Loaded {len(self.power_history)} cached "
-                          f"power history entries")
-        except Exception as e:
-            print(f"⚠️ Could not load power history cache: {e}")
-            self.power_history = []
-    
-    def _save_power_history(self):
-        """Save power history to cache file"""
-        try:
-            data = {
-                'power_history': self.power_history,
-                'last_saved': datetime.now().isoformat()
-            }
-            with open(self.power_history_file, 'w') as f:
-                json.dump(data, f, indent=2)
-        except Exception as e:
-            print(f"⚠️ Could not save power history cache: {e}")
-    
-    def clean_false_zero_readings(self):
-        """Remove false zero power readings caused by login failures"""
-        print("🧹 Cleaning false zero power readings...")
-        
-        # Load current history
-        self._load_power_history()
-        
-        original_count = len(self.power_history)
-        
-        # Filter out suspicious zero readings during daylight hours
-        cleaned_history = []
-        for entry in self.power_history:
-            try:
-                # Parse timestamp
-                timestamp = datetime.fromisoformat(entry['timestamp'])
-                hour = timestamp.hour
-                power = entry.get('power', 0)
-                
-                # Check if this is a suspicious zero reading
-                # (zero power during daylight hours 8 AM - 6 PM)
-                is_suspicious_zero = (
-                    power == 0.0 and 
-                    8 <= hour <= 18 and  # Daylight hours
-                    entry.get('data_source') != 'success'  # Not marked as successful
-                )
-                
-                if not is_suspicious_zero:
-                    cleaned_history.append(entry)
-                else:
-                    print(f"   🗑️  Removing suspicious zero reading at {entry['time']} ({power} kW)")
-                    
-            except (ValueError, KeyError) as e:
-                # Keep entry if we can't parse it
-                print(f"   ⚠️  Keeping unparseable entry: {e}")
-                cleaned_history.append(entry)
-        
-        # Update history
-        self.power_history = cleaned_history
-        removed_count = original_count - len(cleaned_history)
-        
-        print(f"✅ Cleaned {removed_count} false zero readings")
-        print(f"📊 Power history: {len(self.power_history)} entries remaining")
-        
-        # Save cleaned history
-        self._save_power_history()
-        
-        return removed_count
-    
-    def daily_report_scheduler(self):
-        """Background thread to send daily reports based on sunset time"""
-        print("🌅 Starting daily report scheduler...")
-        while self.monitoring:
-            try:
-                # Check if we already sent the report today
-                if self.daily_report_sent_today:
-                    # Sleep until tomorrow
-                    time_until_midnight = (
-                        datetime.combine(datetime.now().date() + timedelta(days=1), datetime.min.time()) -
-                        datetime.now()
-                    ).total_seconds()
-                    print(f"⏳ Waiting for midnight to reset daily report flag ({time_until_midnight/60:.1f} minutes)")
-                    time.sleep(time_until_midnight)
-                    self.daily_report_sent_today = False
-                    continue
-                
-                # Calculate sunset time for today
-                sunset_time = calculate_sunset_time()
-                sunset_time = sunset_time.replace(tzinfo=None)  # Remove timezone info for comparison
-                
-                # Current time
-                now = datetime.now()
-                
-                # Check if it's time to send the report (30 minutes after sunset)
-                report_time = sunset_time + timedelta(minutes=self.sunset_buffer_minutes)
-                
-                if now >= report_time and now.date() == sunset_time.date():
-                    print("🌇 Sending daily report based on sunset time...")
-                    self.send_daily_report()
-                    self.daily_report_sent_today = True
-                else:
-                    # Sleep until the next check (e.g., 10 minutes)
-                    time_until_next_check = (report_time - now).total_seconds()
-                    if time_until_next_check > 0:
-                        print(f"⏳ Waiting for next report check ({time_until_next_check/60:.1f} minutes)")
-                        time.sleep(min(time_until_next_check, 3600))  # Check again in 10 minutes or less
-                    else:
-                        # If we missed the time, force send the report and reset the flag
-                        print("⚠️ Missed scheduled report time, sending report now")
-                        self.send_daily_report()
-                        self.daily_report_sent_today = True
-            
-            except Exception as e:
-                print(f"❌ Daily report scheduler error: {e}")
-                time.sleep(3600)  # Sleep 1 hour on error
-    
-    def send_daily_report(self):
-        """Send the daily report email"""
-        try:
-            import smtplib
-            from email.mime.text import MIMEText
-            
-            # Load email config
-            config_file = 'email_config.json'
-            if not os.path.exists(config_file):
-                print("⚠️ Email configuration not found, skipping daily report")
-                return
-            
-            with open(config_file, 'r') as f:
-                config = json.load(f)
-            
-            # Get current system data
-            current_data = self.get_current_data()
-            
-            # Get today's power history
-            today_history = self.get_power_history(24)
-            
-            # Calculate comprehensive daily stats
-            if today_history:
-                power_values = [entry['power'] for entry in today_history]
-                max_power = max(power_values)
-                avg_power = sum(power_values) / len(power_values)
-                min_power = min(power_values)
-                
-                # Calculate production hours (power > 0.01 kW)
-                production_entries = [p for p in power_values if p > 0.01]
-                production_hours = len(production_entries) * 0.25  # Each entry represents ~15 min
-                
-                # Check if system is currently producing (for sunset detection)
-                current_power = current_data.get('power_kw', 0)
-                is_currently_producing = current_power > 0.01
-                
-                # Estimate efficiency
-                inverter_efficiency = (current_data.get('active_inverters', 0) / current_data.get('total_inverters', 25)) * 100
-            else:
-                max_power = avg_power = min_power = 0
-                production_hours = 0
-                is_currently_producing = False
-                inverter_efficiency = 0
-            
-            # Determine report timing context
-            current_hour = datetime.now().hour
-            if current_hour >= 20 or current_hour <= 6:
-                timing_note = "📅 End-of-day report"
-            elif not is_currently_producing and current_hour >= 16:
-                timing_note = "🌅 Post-sunset report (solar production complete)"
-            else:
-                timing_note = "☀️ Mid-day report (solar production ongoing)"
-            
-            # Generate comprehensive report
-            report_body = f"""📊 Daily Solar Report - {datetime.now().strftime('%A, %B %d, %Y')}
-{timing_note}
-
-🌞 TODAY'S SOLAR PERFORMANCE:
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-⚡ Current Power: {current_data.get('power_kw', 0):.3f} kW
-📈 Peak Power Today: {max_power:.3f} kW  
-📊 Average Power: {avg_power:.3f} kW
-📉 Minimum Power: {min_power:.3f} kW
-🔋 Energy Generated Today: {current_data.get('energy_today_kwh', 0):.2f} kWh
-⏰ Production Hours: {production_hours:.1f} hours
-🏆 Lifetime Energy: {current_data.get('lifetime_energy_mwh', 0):.2f} MWh
-
-🔧 SYSTEM HEALTH & STATUS:
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🟢 System Status: {'Online' if current_data.get('is_online') else 'Offline'}
-🔌 Active Inverters: {current_data.get('active_inverters', 0)}/{current_data.get('total_inverters', 25)}
-📊 Inverter Efficiency: {inverter_efficiency:.1f}%
-🏥 Health Status: {current_data.get('health_status', 'Unknown')}
-🕐 Last Data Update: {current_data.get('last_update', 'Unknown')}
-
-📈 DAILY SUMMARY:
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-• {'✅ System performed well today' if max_power > 2.0 else '⚠️ Below expected peak performance'}
-• {'✅ All inverters operational' if inverter_efficiency > 95 else f'⚠️ {100-inverter_efficiency:.0f}% inverters may need attention'}
-• {'🌙 Solar production complete for today' if not is_currently_producing and current_hour >= 16 else '☀️ Solar production ongoing'}
-
-🌐 Dashboard: http://localhost:5001
-📧 Report Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-This automated report is sent after solar production ends for the day.
-Configure timing and alerts at: http://localhost:5001/admin
-"""
-            
-            # Send email
-            msg = MIMEText(report_body)
-            report_date = datetime.now().strftime("%m/%d/%Y")
-            energy_summary = f"{current_data.get('energy_today_kwh', 0):.1f}kWh"
-            msg['Subject'] = f'🌞 Daily Solar Report - {report_date} - {energy_summary} Generated'
-            msg['From'] = config['smtp_username']
-            msg['To'] = config['email']
-            
-            print(f"📧 Sending daily report to {config['email']}")
-            print(f"📊 Today's stats: {energy_summary}, Peak: {max_power:.2f}kW, {production_hours:.1f}h production")
-            
-            server = smtplib.SMTP(config['smtp_server'], int(config['smtp_port']))
-            server.starttls()
-            server.login(config['smtp_username'], config['smtp_password'])
-            server.send_message(msg)
-            server.quit()
-            
-            print("✅ Daily report sent successfully!")
-        except Exception as e:
-            error_msg = str(e)
-            print(f"❌ Daily report error: {error_msg}")
 
     def _fetch_individual_inverter_data(self):
         """Fetch individual inverter power data from Chilicon API"""
         try:
             import requests
             from collections import defaultdict
-            import statistics
             
             # Today's date for the API call
             today = datetime.now().strftime("%Y-%m-%d")
@@ -924,10 +658,9 @@ Configure timing and alerts at: http://localhost:5001/admin
                 -1863319078: '90F001DA',  # Position 22
                 -1863319180: '90F00174',  # Position 23
                 -1863319171: '90F0017D',  # Position 24
-                # Additional inverters found in Chilicon data
-                1093666578: '41300712',   # New hex format inverter
-                -1053817559: '3ECFFAD7',  # Negative ID format
-                3241149737: 'C1300529',   # Missing inverter from Chilicon site
+                # Additional inverter IDs discovered (converted to hex)
+                -1053817559: 'C1300529',  # Position 5 (hex conversion)
+                1093666578: '41300712',   # Position 20 (hex conversion)
             }
             
             # Create session with proper headers
@@ -1020,8 +753,8 @@ Configure timing and alerts at: http://localhost:5001/admin
                     'positive_readings': len(positive_powers),
                     'max_power': max(powers) if powers else 0,
                     'min_power': min(powers) if powers else 0,
-                    'avg_power': statistics.mean(powers) if powers else 0,
-                    'avg_positive_power': statistics.mean(positive_powers) if positive_powers else 0,
+                    'avg_power': sum(powers) / len(powers) if powers else 0,
+                    'avg_positive_power': sum(positive_powers) / len(positive_powers) if positive_powers else 0,
                     'production_hours': len(positive_powers) * 5 / 60 if positive_powers else 0,
                     'current_power': powers[-1] if powers else 0,
                     'peak_time': readings[powers.index(max(powers))]['time'] if powers else 'N/A',
@@ -1039,14 +772,281 @@ Configure timing and alerts at: http://localhost:5001/admin
             print(f"❌ Error fetching individual inverter data: {e}")
             return []
 
+    def get_current_data(self):
+        """Get current system data"""
+        return self.current_data.copy()
+    
+    def get_power_history(self, hours=24):
+        """Get power history for charts"""
+        cutoff_time = datetime.now() - timedelta(hours=hours)
+        
+        recent_history = []
+        for entry in self.power_history:
+            try:
+                entry_time = datetime.fromisoformat(entry['timestamp'])
+                if entry_time >= cutoff_time:
+                    recent_history.append({
+                        'time': entry['time'],
+                        'power': entry['power']
+                    })
+            except Exception:
+                continue
+
+        return recent_history
+    
+    def _load_power_history(self):
+        """Load power history from cache file"""
+        try:
+            if os.path.exists(self.power_history_file):
+                with open(self.power_history_file, 'r') as f:
+                    data = json.load(f)
+                    self.power_history = data.get('power_history', [])
+                    
+                    # Clean old entries (older than 24 hours)
+                    cutoff_time = datetime.now() - timedelta(hours=24)
+                    self.power_history = [
+                        entry for entry in self.power_history
+                        if datetime.fromisoformat(
+                            entry['timestamp']
+                        ) > cutoff_time
+                    ]
+                    print(f"📊 Loaded {len(self.power_history)} cached power history entries")
+        except Exception as e:
+            print(f"⚠️ Could not load power history cache: {e}")
+            self.power_history = []
+    
+    def _save_power_history(self):
+        """Save power history to cache file"""
+        try:
+            data = {
+                'power_history': self.power_history,
+                'last_saved': datetime.now().isoformat()
+            }
+            with open(self.power_history_file, 'w') as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            print(f"⚠️ Could not save power history cache: {e}")
+
+
 # Global dashboard instance
 dashboard = EnhancedDashboard()
+
+
+# Debug endpoints for monitoring background thread
+@app.route('/debug/status')
+def debug_status():
+    """Debug endpoint to check background thread status"""
+    try:
+        status = {
+            'monitoring_active': dashboard.monitoring,
+            'thread_alive': dashboard.update_thread and dashboard.update_thread.is_alive(),
+            'daily_report_thread_alive': dashboard.daily_report_thread and dashboard.daily_report_thread.is_alive(),
+            'current_time': datetime.now().isoformat(),
+            'debug_info': getattr(dashboard, 'debug_info', {'error': 'No debug info available'})
+        }
+        
+        # Add cache age
+        if dashboard.current_data.get('last_update'):
+            try:
+                last_update = datetime.fromisoformat(dashboard.current_data['last_update'])
+                age_seconds = (datetime.now() - last_update).total_seconds()
+                status['cache_age_minutes'] = round(age_seconds / 60, 1)
+                status['next_update_minutes'] = max(0, round((900 - age_seconds) / 60, 1))
+            except:
+                pass
+        
+        return jsonify(status)
+    except Exception as e:
+        return jsonify({'error': str(e)})
+
+
+@app.route('/debug/force-update')
+def debug_force_update():
+    """Debug endpoint to force a data update"""
+    try:
+        print("🔧 Debug: Forcing data update...")
+        success = dashboard._fetch_from_website()
+        return jsonify({
+            'success': success,
+            'message': 'Data update completed' if success else 'Data update failed',
+            'timestamp': datetime.now().isoformat()
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
 
 
 @app.route('/')
 def index():
     """Main dashboard page"""
     return render_template('dashboard.html')
+
+
+@app.route('/admin')
+def admin():
+    """Admin configuration page"""
+    # Load configuration files
+    email_config = {}
+    alert_config = {}
+    imessage_config = {}
+    
+    try:
+        if os.path.exists('email_config.json'):
+            with open('email_config.json', 'r') as f:
+                email_config = json.load(f)
+    except Exception as e:
+        print(f"Warning: Could not load email_config.json: {e}")
+    
+    try:
+        if os.path.exists('alert_config.json'):
+            with open('alert_config.json', 'r') as f:
+                alert_config = json.load(f)
+    except Exception as e:
+        print(f"Warning: Could not load alert_config.json: {e}")
+    
+    # iMessage config (may not exist)
+    try:
+        if os.path.exists('imessage_config.json'):
+            with open('imessage_config.json', 'r') as f:
+                imessage_config = json.load(f)
+    except Exception as e:
+        print(f"Info: No imessage_config.json found: {e}")
+    
+    return render_template('admin.html',
+                           email_config=email_config,
+                           alert_config=alert_config,
+                           imessage_config=imessage_config)
+
+
+@app.route('/api/admin/test-imessage', methods=['POST'])
+def test_imessage():
+    """Test iMessage functionality"""
+    try:
+        # Send test iMessage using alert manager
+        result = dashboard.alert_manager.send_alert_imessage(
+            "🧪 Test iMessage from Dashboard Admin Panel", 
+            "info"
+        )
+        
+        if result.get('success'):
+            return jsonify({
+                'success': True,
+                'message': 'Test iMessage sent successfully!'
+            })
+        else:
+            return jsonify({
+                'success': False,
+                'error': result.get('error', 'Unknown error occurred')
+            })
+            
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': f'iMessage test failed: {str(e)}'
+        })
+
+
+@app.route('/api/admin/test-alerts', methods=['POST'])
+def test_all_alerts():
+    """Test all alert methods with multiple alert scenarios"""
+    results = {
+        'email_tests': [],
+        'imessage_tests': [],
+        'total_sent': 0,
+        'total_failed': 0
+    }
+    
+    # Define test alert scenarios
+    test_scenarios = [
+        {
+            'type': 'low_power',
+            'email_subject': '🔋 Test Low Power Alert',
+            'email_body': 'TEST: Solar system producing very low power. Multiple inverters may be offline.',
+            'imessage_text': '🔋 TEST: Low power alert - Solar system underperforming',
+            'severity': 'warning'
+        },
+        {
+            'type': 'offline_inverters',
+            'email_subject': '⚠️ Test Offline Inverters Alert',
+            'email_body': 'TEST: Multiple microinverters are offline. Inverters 90F00179, 90F00170 not responding.',
+            'imessage_text': '⚠️ TEST: Offline inverters detected - Check solar array',
+            'severity': 'warning'
+        },
+        {
+            'type': 'system_health',
+            'email_subject': '🔧 Test System Health Alert',
+            'email_body': 'TEST: Solar monitoring system health check. All systems operational.',
+            'imessage_text': '🔧 TEST: System health check - Dashboard monitoring active',
+            'severity': 'info'
+        }
+    ]
+    
+    try:
+        for scenario in test_scenarios:
+            # Test email alert for this scenario
+            try:
+                email_result = dashboard.alert_manager.send_alert_email(
+                    scenario['email_subject'],
+                    scenario['email_body'],
+                    scenario['severity']
+                )
+                results['email_tests'].append({
+                    'scenario': scenario['type'],
+                    'result': email_result
+                })
+                if email_result.get('success'):
+                    results['total_sent'] += 1
+                else:
+                    results['total_failed'] += 1
+            except Exception as e:
+                results['email_tests'].append({
+                    'scenario': scenario['type'],
+                    'result': {'success': False, 'error': str(e)}
+                })
+                results['total_failed'] += 1
+            
+            # Test iMessage alert for this scenario
+            try:
+                imessage_result = dashboard.alert_manager.send_alert_imessage(
+                    scenario['imessage_text'],
+                    scenario['severity']
+                )
+                results['imessage_tests'].append({
+                    'scenario': scenario['type'],
+                    'result': imessage_result
+                })
+                if imessage_result.get('success'):
+                    results['total_sent'] += 1
+                else:
+                    results['total_failed'] += 1
+            except Exception as e:
+                results['imessage_tests'].append({
+                    'scenario': scenario['type'],
+                    'result': {'success': False, 'error': str(e)}
+                })
+                results['total_failed'] += 1
+        
+        # Create summary message
+        if results['total_sent'] > 0:
+            message = f"Sent {results['total_sent']} test alerts ({len(test_scenarios)} scenarios x 2 methods)"
+            if results['total_failed'] > 0:
+                message += f". {results['total_failed']} failed."
+            success = True
+        else:
+            message = f"All {results['total_failed']} test alerts failed. Check configurations."
+            success = False
+        
+        return jsonify({
+            'success': success,
+            'message': message,
+            'details': results
+        })
+        
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': f'Alert test failed: {str(e)}',
+            'details': results
+        })
 
 
 @app.route('/api/current')
@@ -1100,389 +1100,12 @@ def api_inverters():
     })
 
 
-@app.route('/admin')
-def admin():
-    """Admin panel for email and alert configuration - server-side rendered"""
-    # Load all configs server-side
-    email_config = {}
-    alert_config = {}
-    imessage_config = {}
-    
-    try:
-        if os.path.exists('email_config.json'):
-            with open('email_config.json', 'r') as f:
-                email_config = json.load(f)
-    except Exception as e:
-        print(f"Error loading email config: {e}")
-    
-    try:
-        if os.path.exists('alert_config.json'):
-            with open('alert_config.json', 'r') as f:
-                alert_config = json.load(f)
-    except Exception as e:
-        print(f"Error loading alert config: {e}")
-    
-    try:
-        if os.path.exists('imessage_config.json'):
-            with open('imessage_config.json', 'r') as f:
-                imessage_config = json.load(f)
-    except Exception as e:
-        print(f"Error loading iMessage config: {e}")
-    
-    # Render template with pre-filled config values
-    return render_template('admin.html', 
-                         email_config=email_config, 
-                         alert_config=alert_config, 
-                         imessage_config=imessage_config)
-
-
-@app.route('/api/admin/email-config', methods=['GET', 'POST'])
-def admin_email_config():
-    """Get or save email configuration"""
-    config_file = 'email_config.json'
-    
-    if request.method == 'POST':
-        try:
-            config = request.json
-            with open(config_file, 'w') as f:
-                json.dump(config, f, indent=2)
-            return jsonify({'success': True})
-        except Exception as e:
-            return jsonify({'success': False, 'error': str(e)})
-    else:
-        try:
-            if os.path.exists(config_file):
-                with open(config_file, 'r') as f:
-                    return jsonify(json.load(f))
-            return jsonify({})
-        except Exception as e:
-            return jsonify({'error': str(e)})
-
-
-@app.route('/api/admin/alert-config', methods=['GET', 'POST'])
-def admin_alert_config():
-    """Get or save alert configuration"""
-    config_file = 'alert_config.json'
-    
-    if request.method == 'POST':
-        try:
-            config = request.json
-            with open(config_file, 'w') as f:
-                json.dump(config, f, indent=2)
-            return jsonify({'success': True})
-        except Exception as e:
-            return jsonify({'success': False, 'error': str(e)})
-    else:
-        try:
-            if os.path.exists(config_file):
-                with open(config_file, 'r') as f:
-                    return jsonify(json.load(f))
-            return jsonify({})
-        except Exception as e:
-            return jsonify({'error': str(e)})
-
-
-@app.route('/api/admin/imessage-config', methods=['GET', 'POST'])
-def admin_imessage_config():
-    """Get or save iMessage configuration"""
-    config_file = 'imessage_config.json'
-    
-    if request.method == 'POST':
-        try:
-            config = request.json
-            with open(config_file, 'w') as f:
-                json.dump(config, f, indent=2)
-            return jsonify({'success': True})
-        except Exception as e:
-            return jsonify({'success': False, 'error': str(e)})
-    else:
-        try:
-            if os.path.exists(config_file):
-                with open(config_file, 'r') as f:
-                    return jsonify(json.load(f))
-            return jsonify({})
-        except Exception as e:
-            return jsonify({'error': str(e)})
-
-
-@app.route('/api/admin/test-email', methods=['POST'])
-def admin_test_email():
-    """Send test email"""
-    try:
-        import smtplib
-        from email.mime.text import MIMEText
-        
-        # Load email config
-        config_file = 'email_config.json'
-        if not os.path.exists(config_file):
-            return jsonify({'success': False, 'error': 'Email not configured'})
-            
-        with open(config_file, 'r') as f:
-            config = json.load(f)
-        
-        # Validate required fields
-        required_fields = ['email', 'smtp_server', 'smtp_port', 'smtp_username', 'smtp_password']
-        for field in required_fields:
-            if not config.get(field):
-                return jsonify({'success': False, 'error': f'Missing {field} in configuration'})
-        
-        # Send test email
-        msg = MIMEText('This is a test email from your Chilicon Dashboard admin panel.')
-        msg['Subject'] = 'Chilicon Dashboard Test Email'
-        msg['From'] = config['smtp_username']
-        msg['To'] = config['email']
-        
-        print(f"📧 Attempting to send email via {config['smtp_server']}:{config['smtp_port']}")
-        
-        server = smtplib.SMTP(config['smtp_server'], int(config['smtp_port']))
-        server.starttls()
-        server.login(config['smtp_username'], config['smtp_password'])
-        server.send_message(msg)
-        server.quit()
-        
-        print("✅ Test email sent successfully!")
-        return jsonify({'success': True})
-    except Exception as e:
-        error_msg = str(e)
-        print(f"❌ Email error: {error_msg}")
-        return jsonify({'success': False, 'error': error_msg})
-
-
-@app.route('/api/admin/test-alerts', methods=['POST'])
-def admin_test_alerts():
-    """Send test alerts using the intelligent alerting system with user's delivery preferences"""
-    try:
-        # Load alert configuration
-        alert_config_file = 'alert_config.json'
-        if not os.path.exists(alert_config_file):
-            return jsonify({'success': False, 'error': 'Alert configuration not found'})
-            
-        with open(alert_config_file, 'r') as f:
-            alert_config = json.load(f)
-        
-        # Check if alerts are enabled
-        if not alert_config.get('inverter_alerts_enabled', True):
-            return jsonify({'success': False, 'error': 'Inverter alerts are disabled'})
-        
-        # Determine delivery methods based on user preferences
-        delivery_methods = []
-        if alert_config.get('email_alerts_enabled', True):
-            delivery_methods.append('email')
-        if alert_config.get('imessage_alerts_enabled', True):
-            delivery_methods.append('imessage')
-        
-        if not delivery_methods:
-            return jsonify({'success': False, 'error': 'No alert delivery methods enabled'})
-        
-        # Get current system data for context
-        current_data = dashboard.get_current_data()
-        
-        # Create test alerts using the intelligent alerting system
-        test_alerts = [
-            {
-                'type': 'test_low_active',
-                'severity': 'WARNING',
-                'message': f"TEST ALERT: Only 18/25 inverters active (below threshold of {alert_config.get('min_active_inverters', 20)})",
-                'active_count': 18,
-                'total_count': 25,
-                'timestamp': datetime.now().isoformat(),
-                'timing_context': f"Test alert generated at {datetime.now().strftime('%H:%M')} (manual test)"
-            },
-            {
-                'type': 'test_offline',
-                'severity': 'WARNING', 
-                'message': f"TEST ALERT: {alert_config.get('max_offline_inverters', 3) + 1} detected inverters offline: 90F00179, 90F0015C, 90F00188, 90F00170",
-                'offline_count': alert_config.get('max_offline_inverters', 3) + 1,
-                'offline_serials': ['90F00179', '90F0015C', '90F00188', '90F00170'],
-                'timestamp': datetime.now().isoformat(),
-                'timing_context': f"Test alert generated at {datetime.now().strftime('%H:%M')} (manual test)"
-            }
-        ]
-        
-        print(f"� Sending test alerts via: {', '.join(delivery_methods)}")
-        
-        # Use the intelligent alert manager to send alerts
-        results = []
-        for alert in test_alerts:
-            alert_results = dashboard.alert_manager.send_inverter_alert(alert, delivery_methods)
-            results.extend(alert_results)
-        
-        # Count successful deliveries
-        successful_deliveries = []
-        failed_deliveries = []
-        
-        for method, result in results:
-            if result.get('success'):
-                successful_deliveries.append(method)
-            else:
-                failed_deliveries.append(f"{method}: {result.get('error', 'Unknown error')}")
-        
-        # Prepare response
-        if successful_deliveries:
-            success_msg = f"Test alerts sent successfully via: {', '.join(successful_deliveries)}"
-            if failed_deliveries:
-                success_msg += f". Failed: {', '.join(failed_deliveries)}"
-            
-            print(f"✅ {success_msg}")
-            return jsonify({'success': True, 'message': success_msg})
-        else:
-            error_msg = f"All test alerts failed: {', '.join(failed_deliveries)}"
-            print(f"❌ {error_msg}")
-            return jsonify({'success': False, 'error': error_msg})
-        
-    except Exception as e:
-        error_msg = str(e)
-        print(f"❌ Test alerts error: {error_msg}")
-        return jsonify({'success': False, 'error': error_msg})
-
-
-@app.route('/api/admin/test-imessage', methods=['POST'])
-def admin_test_imessage():
-    """Send test iMessage"""
-    try:
-        import subprocess
-        
-        # Load iMessage config
-        config_file = 'imessage_config.json'
-        if not os.path.exists(config_file):
-            return jsonify({'success': False, 'error': 'iMessage not configured'})
-            
-        with open(config_file, 'r') as f:
-            config = json.load(f)
-        
-        if not config.get('imessage_enabled'):
-            return jsonify({'success': False, 'error': 'iMessage is disabled'})
-            
-        if not config.get('imessage_phone'):
-            return jsonify({'success': False, 'error': 'No phone number configured'})
-        
-        # Get current system data for context
-        current_data = dashboard.get_current_data()
-        
-        message = f"""🔌 Chilicon Solar Dashboard Test
-
-This is a test message from your solar monitoring system.
-
-Current Status:
-⚡ Power: {current_data.get('power_kw', 0):.3f} kW
-🔋 Active Inverters: {current_data.get('active_inverters', 0)}/{current_data.get('total_inverters', 25)}
-🕐 Time: {datetime.now().strftime('%H:%M:%S')}
-
-System is functioning normally."""
-        
-        phone = config['imessage_phone']
-        
-        # Use AppleScript to send iMessage (macOS only)
-        applescript = f'''
-        tell application "Messages"
-            set targetService to 1st service whose service type = iMessage
-            set targetBuddy to buddy "{phone}" of targetService
-            send "{message}" to targetBuddy
-        end tell
-        '''
-        
-        print(f"📱 Sending test iMessage to {phone}")
-        
-        result = subprocess.run(['osascript', '-e', applescript], 
-                              capture_output=True, text=True)
-        
-        if result.returncode == 0:
-            print("✅ Test iMessage sent successfully!")
-            return jsonify({'success': True})
-        else:
-            error_msg = result.stderr or "Failed to send iMessage"
-            print(f"❌ iMessage error: {error_msg}")
-            return jsonify({'success': False, 'error': error_msg})
-            
-    except Exception as e:
-        error_msg = str(e)
-        print(f"❌ iMessage error: {error_msg}")
-        return jsonify({'success': False, 'error': error_msg})
-
-
-@app.route('/api/admin/send-daily-report', methods=['POST'])
-def admin_send_daily_report():
-    """Generate and send daily status report"""
-    try:
-        result = dashboard._generate_and_send_daily_report()
-        return jsonify(result)
-    except Exception as e:
-        error_msg = str(e)
-        print(f"❌ Daily report error: {error_msg}")
-        return jsonify({'success': False, 'error': error_msg})
-
-
-@app.route('/api/admin/sunset-info', methods=['GET'])
-def admin_sunset_info():
-    """Get sunset time and daily report scheduling information"""
-    try:
-        sunset_time = calculate_sunset_time()
-        report_time = sunset_time + timedelta(minutes=dashboard.sunset_buffer_minutes)
-        current_time = datetime.now()
-        
-        # Calculate next report time
-        if current_time > report_time:
-            # Already passed today's time, next is tomorrow
-            tomorrow_sunset = calculate_sunset_time() + timedelta(days=1)
-            next_report_time = tomorrow_sunset + timedelta(minutes=dashboard.sunset_buffer_minutes)
-        else:
-            next_report_time = report_time
-        
-        return jsonify({
-            'today_sunset': sunset_time.strftime('%H:%M'),
-            'today_report_time': report_time.strftime('%H:%M'),
-            'next_report_time': next_report_time.strftime('%H:%M'),
-            'next_report_date': next_report_time.strftime('%Y-%m-%d'),
-            'buffer_minutes': dashboard.sunset_buffer_minutes,
-            'current_time': current_time.strftime('%H:%M'),
-            'report_sent_today': dashboard.daily_report_sent_today
-        })
-    except Exception as e:
-        return jsonify({'error': str(e)})
-
-
-@app.route('/api/admin/reset-daily-report', methods=['POST'])
-def admin_reset_daily_report():
-    """Reset the daily report flag (for testing/manual correction)"""
-    try:
-        dashboard.daily_report_sent_today = False
-        dashboard.last_daily_report_date = None
-        current_date = datetime.now().date()
-        return jsonify({
-            'success': True, 
-            'message': f'Daily report flag reset for {current_date}',
-            'current_date': str(current_date),
-            'report_sent_today': dashboard.daily_report_sent_today
-        })
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)})
-
-
-@app.route('/api/admin/daily-report-status', methods=['GET'])
-def admin_daily_report_status():
-    """Get current daily report status for debugging"""
-    try:
-        current_date = datetime.now().date()
-        sunset_time = calculate_sunset_time()
-        report_time = sunset_time + timedelta(minutes=dashboard.sunset_buffer_minutes)
-        
-        return jsonify({
-            'current_date': str(current_date),
-            'current_time': datetime.now().strftime('%H:%M:%S'),
-            'report_sent_today': dashboard.daily_report_sent_today,
-            'last_daily_report_date': str(dashboard.last_daily_report_date) if dashboard.last_daily_report_date else None,
-            'today_sunset': sunset_time.strftime('%H:%M'),
-            'today_report_time': report_time.strftime('%H:%M'),
-            'is_past_report_time': datetime.now() >= report_time
-        })
-    except Exception as e:
-        return jsonify({'error': str(e)})
-
-
 def run_dashboard(host='0.0.0.0', port=5000, debug=False):
     """Run the dashboard server"""
     print("🌐 Starting Enhanced Chilicon Dashboard...")
     print(f"📊 Dashboard: http://{host}:{port}")
+    print(f"🔍 Debug Status: http://{host}:{port}/debug/status")
+    print(f"🔧 Force Update: http://{host}:{port}/debug/force-update")
     print("🔌 Monitoring service active")
     
     app.run(host=host, port=port, debug=debug)

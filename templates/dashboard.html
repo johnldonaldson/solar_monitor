@@ -502,7 +502,9 @@
         }
         
         function updateDashboard() {
-            fetch('/api/current')
+            // Add cache-busting parameter to force fresh data
+            const cacheBuster = new Date().getTime();
+            fetch(`/api/current?_=${cacheBuster}`)
                 .then(response => response.json())
                 .then(data => {
                     updateMainMetrics(data);
@@ -713,7 +715,9 @@ Peak Time: ${stats.peak_time}`;
         }
         
         function updateChart() {
-            fetch('/api/history?hours=24')
+            // Add cache-busting parameter to force fresh data
+            const cacheBuster = new Date().getTime();
+            fetch(`/api/history?hours=24&_=${cacheBuster}`)
                 .then(response => response.json())
                 .then(data => {
                     const history = data.power_history || [];
