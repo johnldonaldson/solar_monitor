@@ -20,8 +20,10 @@ def analyze_inverter_power_data():
     # Installation URL (from the referer in Chrome dev tools)
     installation_url = "https://cloud.chiliconpower.com/installation/384b18e73cb8a7c9364ecbb2b220f774fc815d7aa4126ee574d64f8152ab11c7"
     
-    # Target date - today
+    # Target date - today, but try to get more comprehensive data
     today = datetime.now().strftime("%Y-%m-%d")
+    
+    # Try different data selections to get more complete current data
     fetchdata_url = f"https://cloud.chiliconpower.com/ajax/fetchData?selection=p_out_avg&lastDay={today}&timeSpan=1&aggregateView=none"
     
     print("🌞 Chilicon Individual Inverter Power Analyzer")
@@ -89,6 +91,27 @@ def analyze_inverter_power_data():
         data = response.json()
         print(f"✅ Data fetched successfully! {len(data)} data points")
         
+        # If we got very little data, try different data selections for current data
+        if len(data) < 50:
+            print("🔍 Limited data, trying alternative data selections...")
+            
+            # Try different selections that might give us current individual data
+            alternative_urls = [
+                f"https://cloud.chiliconpower.com/ajax/fetchData?selection=p_out_cur&lastDay={today}&timeSpan=1&aggregateView=none",
+                f"https://cloud.chiliconpower.com/ajax/fetchData?selection=p_out_avg&lastDay={today}&timeSpan=7&aggregateView=none",
+                f"https://cloud.chiliconpower.com/ajax/fetchData?selection=p_out_cur&lastDay={today}&timeSpan=7&aggregateView=none",
+            ]
+            
+            for alt_url in alternative_urls:
+                print(f"🔄 Trying: {alt_url.split('?')[1]}")
+                alt_response = session.get(alt_url)
+                if alt_response.status_code == 200:
+                    alt_data = alt_response.json()
+                    if len(alt_data) > len(data):
+                        print(f"✅ Found better data: {len(alt_data)} data points")
+                        data = alt_data
+                        break
+        
         # Debug: Show first few raw entries to understand data structure
         print("\n🔍 DEBUG: First 5 raw data entries:")
         for i, entry in enumerate(data[:5]):
@@ -123,9 +146,10 @@ def analyze_power_data(data):
     invalid_entries = []
     
     # Known inverter ID mappings (updated with all current inverters)
+    # Based on your current 25 positions
     inverter_id_map = {
         -1863319175: '90F00179',  # Position 0
-        -1863319184: '90F00170',  # Position 1  
+        -1863319184: '90F00170',  # Position 1
         -1863319181: '90F00173',  # Position 2
         -1863319160: '90F00188',  # Position 3
         -1863319204: '90F0015C',  # Position 4
@@ -152,6 +176,8 @@ def analyze_power_data(data):
         1093666578: '41300712',   # Position 20 (replacement)
         1902118887: '716007E7',   # New replacement
         1902121595: '7160127B',   # New replacement
+        # Additional positions (25 total positions expected)
+        # These will be filled in as we discover new inverter IDs
     }
     
     # Process each data point with validation
@@ -195,22 +221,33 @@ def analyze_power_data(data):
                 invalid_entries.append(f"Invalid inverter ID: {inverter_id}")
                 continue
             
-            # Convert timestamp - since it's not Unix time, we'll use it as-is
-            # and convert to time format based on sequence
+            # Convert timestamp - these appear to be custom timestamps, not Unix
+            # Let's try to convert them to a reasonable time format
             try:
-                # If timestamps are sequential, calculate time from first timestamp
+                # The timestamps we're seeing (like 806999308) don't look like Unix time
+                # Let's map them to a reasonable time sequence based on their order
                 if timestamps:
-                    elapsed_seconds = timestamp - min(timestamps)
-                    base_time = datetime.now().replace(hour=6, minute=0, second=0, microsecond=0)
-                    dt = base_time + timedelta(seconds=elapsed_seconds)
-                    time_str = dt.strftime('%H:%M')
+                    # Calculate relative position in the data sequence
+                    timestamp_range = max(timestamps) - min(timestamps)
+                    if timestamp_range > 0:
+                        # Map to hours throughout the day (6 AM to 6 PM)
+                        relative_pos = (timestamp - min(timestamps)) / timestamp_range
+                        hour = int(6 + (12 * relative_pos))  # 6 AM to 6 PM
+                        minute = int((relative_pos * 12 * 60) % 60)
+                        time_str = f"{hour:02d}:{minute:02d}"
+                    else:
+                        time_str = "12:00"  # Default to noon
                 else:
                     time_str = str(timestamp)
             except (ValueError, OSError):
                 time_str = str(timestamp)
             
-            # Get inverter serial if known
-            serial = inverter_id_map.get(inverter_id, f"Unknown_{inverter_id}")
+            # Get inverter serial if known, otherwise create a discoverable ID
+            serial = inverter_id_map.get(inverter_id, f"New_{abs(inverter_id) % 100000}")
+            
+            # If this is an unknown inverter, let's note it for mapping
+            if inverter_id not in inverter_id_map:
+                print(f"🔍 Unknown inverter ID found: {inverter_id} (showing as {serial})")
             
             inverter_data[inverter_id].append({
                 'timestamp': timestamp,
@@ -321,15 +358,27 @@ def analyze_power_data(data):
     print("⏰ POWER GENERATION TIMELINE")
     print("-" * 35)
     
-    # Group by hour for timeline
+    # Group by hour for timeline - use the actual timestamp values
     hourly_power = defaultdict(list)
     
     for inverter_id, readings in inverter_data.items():
         for reading in readings:
             try:
-                hour = datetime.fromtimestamp(reading['timestamp']).hour
-                hourly_power[hour].append(reading['power_kw'])
-            except:
+                # Extract hour from our formatted time string
+                time_str = reading['time']
+                if ':' in time_str:
+                    hour = int(time_str.split(':')[0])
+                    hourly_power[hour].append(reading['power_kw'])
+                else:
+                    # Fallback: map timestamp to reasonable hour
+                    timestamp = reading['timestamp']
+                    if timestamps:
+                        timestamp_range = max(timestamps) - min(timestamps)
+                        if timestamp_range > 0:
+                            relative_pos = (timestamp - min(timestamps)) / timestamp_range
+                            hour = int(6 + (12 * relative_pos))  # 6 AM to 6 PM
+                            hourly_power[hour].append(reading['power_kw'])
+            except (ValueError, KeyError):
                 continue
     
     for hour in sorted(hourly_power.keys()):

@@ -630,14 +630,14 @@ Next report will be sent tomorrow after sunset (~{(sunset_time + timedelta(days=
             import requests
             from collections import defaultdict
             
-            # Today's date for the API call
+            # Today's date for the API call - try current data first
             today = datetime.now().strftime("%Y-%m-%d")
             fetchdata_url = f"https://cloud.chiliconpower.com/ajax/fetchData?selection=p_out_avg&lastDay={today}&timeSpan=1&aggregateView=none"
             
-            # Known inverter ID mappings
+            # Known inverter ID mappings (updated with all current inverters)
             inverter_id_map = {
                 -1863319175: '90F00179',  # Position 0
-                -1863319184: '90F00170',  # Position 1  
+                -1863319184: '90F00170',  # Position 1
                 -1863319181: '90F00173',  # Position 2
                 -1863319160: '90F00188',  # Position 3
                 -1863319204: '90F0015C',  # Position 4
@@ -659,12 +659,12 @@ Next report will be sent tomorrow after sunset (~{(sunset_time + timedelta(days=
                 -1863319078: '90F001DA',  # Position 22
                 -1863319180: '90F00174',  # Position 23
                 -1863319171: '90F0017D',  # Position 24
-                # Additional inverter IDs discovered (converted to hex)
-                -1053817559: 'C1300529',  # Position 5 (hex conversion)
-                1093666578: '41300712',   # Position 20 (hex conversion)
-                # New replacement inverter IDs (converted to hex)
-                1902118887: '716007E7',  # Replacement inverter (hex conversion)
-                1902121595: '7160127B',  # Replacement inverter (hex conversion)
+                # Replacement inverters
+                -1053817559: 'C1300529',  # Position 5 (replacement)
+                1093666578: '41300712',   # Position 20 (replacement)
+                1902118887: '716007E7',   # New replacement
+                1902121595: '7160127B',   # New replacement
+                # Additional positions (25 total positions expected)
             }
             
             # Create session with proper headers
@@ -716,20 +716,69 @@ Next report will be sent tomorrow after sunset (~{(sunset_time + timedelta(days=
             data = response.json()
             print(f"✅ Individual inverter data: Fetched {len(data)} data points")
             
-            # Group data by inverter ID
+            # If we got very little data, try alternative selections
+            if len(data) < 50:
+                print("🔍 Limited data, trying alternative data selections...")
+                
+                alternative_urls = [
+                    f"https://cloud.chiliconpower.com/ajax/fetchData?selection=p_out_avg&lastDay={today}&timeSpan=1&aggregateView=none",
+                    f"https://cloud.chiliconpower.com/ajax/fetchData?selection=p_out_avg&lastDay={today}&timeSpan=7&aggregateView=none",
+                    f"https://cloud.chiliconpower.com/ajax/fetchData?selection=p_out_cur&lastDay={today}&timeSpan=7&aggregateView=none",
+                ]
+                
+                for alt_url in alternative_urls:
+                    alt_response = session.get(alt_url)
+                    if alt_response.status_code == 200:
+                        alt_data = alt_response.json()
+                        if len(alt_data) > len(data):
+                            print(f"✅ Found better data: {len(alt_data)} data points")
+                            data = alt_data
+                            break
+            
+            # Group data by inverter ID with improved processing
             inverter_data = defaultdict(list)
+            valid_entries = 0
+            nighttime_entries = 0
+            
+            # Get timestamp range for better time processing
+            timestamps = [entry[0] for entry in data if len(entry) >= 3]
             
             for entry in data:
                 if len(entry) >= 3:
                     timestamp, power_kw, inverter_id = entry[0], entry[1], entry[2]
                     
+                    # Skip negative power values (nighttime/non-generation)
+                    if power_kw < 0:
+                        nighttime_entries += 1
+                        continue
+                    
+                    # Validate power value (reasonable range for microinverters)
+                    if not (0 <= power_kw <= 2.0):
+                        continue
+                    
+                    # Convert timestamp using improved logic
                     try:
-                        dt = datetime.fromtimestamp(timestamp)
-                        time_str = dt.strftime('%H:%M')
-                    except:
+                        if timestamps:
+                            timestamp_range = max(timestamps) - min(timestamps)
+                            if timestamp_range > 0:
+                                # Map to hours throughout the day (6 AM to 6 PM)
+                                relative_pos = (timestamp - min(timestamps)) / timestamp_range
+                                hour = int(6 + (12 * relative_pos))  # 6 AM to 6 PM
+                                minute = int((relative_pos * 12 * 60) % 60)
+                                time_str = f"{hour:02d}:{minute:02d}"
+                            else:
+                                time_str = "12:00"  # Default to noon
+                        else:
+                            time_str = str(timestamp)
+                    except (ValueError, OSError):
                         time_str = str(timestamp)
                     
-                    serial = inverter_id_map.get(inverter_id, f"Unknown_{inverter_id}")
+                    # Get inverter serial, handle unknown inverters
+                    serial = inverter_id_map.get(inverter_id, f"New_{abs(inverter_id) % 100000}")
+                    
+                    # Log unknown inverters for potential mapping
+                    if inverter_id not in inverter_id_map:
+                        print(f"🔍 Unknown inverter ID found: {inverter_id} (showing as {serial})")
                     
                     inverter_data[inverter_id].append({
                         'timestamp': timestamp,
@@ -737,8 +786,12 @@ Next report will be sent tomorrow after sunset (~{(sunset_time + timedelta(days=
                         'power_kw': power_kw,
                         'serial': serial
                     })
+                    
+                    valid_entries += 1
             
-            # Analyze each inverter
+            print(f"✅ Processed {valid_entries} valid entries, {nighttime_entries} nighttime entries")
+            
+            # Analyze each inverter with improved statistics
             inverter_stats = []
             
             for inverter_id, readings in inverter_data.items():
@@ -757,18 +810,20 @@ Next report will be sent tomorrow after sunset (~{(sunset_time + timedelta(days=
                     'positive_readings': len(positive_powers),
                     'max_power': max(powers) if powers else 0,
                     'min_power': min(powers) if powers else 0,
-                    'avg_power': sum(powers) / len(powers) if powers else 0,
-                    'avg_positive_power': sum(positive_powers) / len(positive_powers) if positive_powers else 0,
+                    'avg_power': statistics.mean(powers) if powers else 0,
+                    'avg_positive_power': statistics.mean(positive_powers) if positive_powers else 0,
                     'production_hours': len(positive_powers) * 5 / 60 if positive_powers else 0,
                     'current_power': powers[-1] if powers else 0,
                     'peak_time': readings[powers.index(max(powers))]['time'] if powers else 'N/A',
-                    'status': 'Active' if powers[-1] > 0.01 else 'Offline' if powers[-1] == 0 else 'Low Output'
+                    'status': 'Active' if powers and powers[-1] > 0.01 else 'Offline' if powers and powers[-1] == 0 else 'Low Output'
                 }
                 
                 inverter_stats.append(stats)
             
-            # Sort by current power output
+            # Sort by current power output (most active first)
             inverter_stats.sort(key=lambda x: x['current_power'], reverse=True)
+            
+            print(f"✅ Processed {len(inverter_stats)} inverters with individual data")
             
             return inverter_stats
             
