@@ -1,0 +1,149 @@
+#!/usr/bin/env python3
+"""
+Enhanced Chilicon Dashboard - Deployment Package Creation
+Creates a zip file with all necessary files for deployment
+"""
+
+import os
+import zipfile
+from datetime import datetime
+
+
+def create_deployment_package():
+    """Create a deployment package with all necessary files"""
+    
+    # Define the files to include
+    required_files = [
+        # Core Dashboard and API files
+        'enhanced_dashboard.py',
+        'enhanced_dashboard_backup.py',
+        
+        # Analysis and Monitoring Tools
+        'advanced_inverter_analyzer.py',
+        'advanced_realtime_extractor.py',
+        'advanced_microinverter_hunter.py',
+        'inverter_management_utility.py',
+        'monitor_dashboard.py',
+        'continuous_power_monitor.py',
+        'complete_monitor_service.py',
+        
+        # Legacy monitoring tools (for compatibility)
+        'legacy_chilicon_monitor.py',
+        'final_microinverter_extractor.py',
+        'chilicon_monitor.py',
+        'chilicon_scraper.py',
+        'chilicon_http_scraper.py',
+        'chilicon_api_client.py',
+        
+        # Alert and notification system
+        'inverter_alert_manager.py',
+        'alert_config.py',
+        
+        # Configuration files
+        'alert_config.json',
+        'email_config.json',
+        'imessage_config.json',
+        'alert_state.json',
+        
+        # Web templates
+        'templates/dashboard.html',
+        'templates/admin.html',
+        
+        # Analysis and utility scripts
+        'enhanced_array_monitor.py',
+        'enhanced_chilicon_api.py',
+        'array_analysis_summary.py',
+        'clean_power_history.py',
+        'automated_monitor.py',
+        
+        # Installation and deployment
+        'requirements.txt',
+        'install.sh',
+        'chilicon-monitor.sh',
+        
+        # Documentation
+        'DEPLOYMENT_README.md',
+        'README.md',
+        'DASHBOARD_ZERO_POWER_FIX.md',
+        'INVERTER_MAPPING_SUMMARY.md',
+        'INVERTER_MANAGEMENT_SYSTEM.md',
+        'SYSTEM_STATUS_SUMMARY.md',
+        'FINAL_STATUS_REPORT.md',
+        
+        # VSCode configuration (for development)
+        '.vscode/tasks.json'
+    ]
+    
+    # Create zip file
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    package_name = f"enhanced_dashboard_package_{timestamp}.zip"
+    
+    print(f"📦 Creating deployment package: {package_name}")
+    
+    with zipfile.ZipFile(package_name, 'w', zipfile.ZIP_DEFLATED) as zipf:
+        files_added = 0
+        missing_files = []
+        
+        for file_path in required_files:
+            if os.path.exists(file_path):
+                zipf.write(file_path, file_path)
+                print(f"✅ Added: {file_path}")
+                files_added += 1
+            else:
+                print(f"⚠️  Missing: {file_path}")
+                missing_files.append(file_path)
+        
+        missing_text = (chr(10).join([f"  ❌ {f}" for f in missing_files])
+                        if missing_files else "  None")
+        
+        # Create a deployment info file
+        deployment_info = f"""Enhanced Chilicon Dashboard - Deployment Package
+Created: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+Total Files: {files_added}/{len(required_files)}
+Missing Files: {len(missing_files)}
+
+FILES INCLUDED:
+{chr(10).join([f"  ✅ {f}" for f in required_files if os.path.exists(f)])}
+
+MISSING FILES:
+{missing_text}
+
+INSTALLATION INSTRUCTIONS:
+1. Extract all files to your target directory
+2. Install Python dependencies: pip install -r requirements.txt
+3. Configure your settings in the JSON config files
+4. Run the dashboard: python enhanced_dashboard.py
+5. Access admin panel at: http://localhost:5000/admin
+
+MAIN FEATURES:
+- Enhanced Dashboard with real-time monitoring
+- Advanced Inverter Analyzer for performance analysis
+- Admin panel for inverter management (add/remove/map)
+- Alert system with email and iMessage notifications
+- Command-line utility for direct inverter management
+- Comprehensive monitoring and analysis tools
+"""
+        
+        zipf.writestr("DEPLOYMENT_INFO.txt", deployment_info)
+        print("✅ Added: DEPLOYMENT_INFO.txt")
+        files_added += 1
+        
+        print("\n📊 Package created successfully!")
+        print(f"📁 File: {package_name}")
+        # +1 for deployment info file
+        total_files = len(required_files) + 1
+        print(f"📋 Files included: {files_added}/{total_files}")
+        print(f"💾 Size: {os.path.getsize(package_name) / 1024:.1f} KB")
+        
+        if missing_files:
+            print(f"\n⚠️  Warning: {len(missing_files)} files were missing:")
+            for missing in missing_files[:5]:  # Show first 5 missing files
+                print(f"   - {missing}")
+            if len(missing_files) > 5:
+                print(f"   ... and {len(missing_files) - 5} more")
+        
+        return package_name
+
+
+if __name__ == "__main__":
+    create_deployment_package()
