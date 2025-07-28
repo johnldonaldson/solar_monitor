@@ -7,6 +7,7 @@ Real-time dashboard with direct data fetching
 import os
 import json
 import math
+import re
 import time
 import statistics
 import threading
@@ -661,6 +662,9 @@ Next report will be sent tomorrow after sunset (~{(sunset_time + timedelta(days=
                 # Additional inverter IDs discovered (converted to hex)
                 -1053817559: 'C1300529',  # Position 5 (hex conversion)
                 1093666578: '41300712',   # Position 20 (hex conversion)
+                # New replacement inverter IDs (converted to hex)
+                1902118887: '716007E7',  # Replacement inverter (hex conversion)
+                1902121595: '7160127B',  # Replacement inverter (hex conversion)
             }
             
             # Create session with proper headers
@@ -1200,6 +1204,365 @@ def get_sunset_info():
         return jsonify({
             'success': False,
             'error': f'Failed to get sunset info: {str(e)}'
+        })
+
+
+@app.route('/api/admin/inverters', methods=['GET'])
+def get_inverter_mapping():
+    """Get current inverter ID mapping"""
+    try:
+        # Get the current inverter mapping from the dashboard
+        inverter_id_map = {
+            -1863319175: '90F00179',  # Position 0
+            -1863319184: '90F00170',  # Position 1  
+            -1863319181: '90F00173',  # Position 2
+            -1863319160: '90F00188',  # Position 3
+            -1863319204: '90F0015C',  # Position 4
+            -1863319143: '90F00199',  # Position 6
+            -1863319173: '90F0017B',  # Position 7
+            -1863319188: '90F0016C',  # Position 8
+            -1863319193: '90F00167',  # Position 9
+            -1863319119: '90F001B1',  # Position 10
+            -1863319163: '90F00185',  # Position 11
+            -1863319114: '90F001B6',  # Position 12
+            -1863319168: '90F00180',  # Position 13
+            -1863319174: '90F0017A',  # Position 14
+            -1863319169: '90F0017F',  # Position 15
+            -1863319121: '90F001AF',  # Position 16
+            -1863319161: '90F00187',  # Position 17
+            -1863319170: '90F0017E',  # Position 18
+            -1863319179: '90F00175',  # Position 19
+            -1863319123: '90F001AD',  # Position 21
+            -1863319078: '90F001DA',  # Position 22
+            -1863319180: '90F00174',  # Position 23
+            -1863319171: '90F0017D',  # Position 24
+            # Additional inverter IDs discovered (converted to hex)
+            -1053817559: 'C1300529',  # Position 5 (replacement)
+            1093666578: '41300712',   # Position 20 (replacement)
+            # New replacement inverter IDs (converted to hex)
+            1902118887: '716007E7',  # Replacement inverter
+            1902121595: '7160127B',  # Replacement inverter
+        }
+        
+        # Convert to a more detailed format
+        inverter_list = []
+        for inverter_id, serial in inverter_id_map.items():
+            # Determine inverter type
+            if inverter_id in [1902118887, 1902121595]:
+                inverter_type = "New Replacement"
+            elif inverter_id in [-1053817559, 1093666578]:
+                inverter_type = "Previous Replacement"
+            else:
+                inverter_type = "Original"
+            
+            inverter_list.append({
+                'id': inverter_id,
+                'serial': serial,
+                'type': inverter_type,
+                'is_positive_id': inverter_id > 0,
+                'hex_calculated': f"{inverter_id:08X}" if inverter_id > 0 else f"{(inverter_id + 2**32):08X}"
+            })
+        
+        # Sort by serial number for consistent display
+        inverter_list.sort(key=lambda x: x['serial'])
+        
+        return jsonify({
+            'success': True,
+            'inverters': inverter_list,
+            'total_count': len(inverter_list)
+        })
+        
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': f'Failed to get inverter mapping: {str(e)}'
+        })
+
+
+@app.route('/api/admin/inverters/add', methods=['POST'])
+def add_inverter_mapping():
+    """Add a new inverter ID mapping"""
+    try:
+        data = request.get_json()
+        inverter_id = data.get('inverter_id')
+        serial = data.get('serial')
+        inverter_type = data.get('type', 'Manual Addition')
+        
+        if not inverter_id or not serial:
+            return jsonify({
+                'success': False,
+                'error': 'Inverter ID and serial are required'
+            })
+        
+        # Validate that it's a proper integer
+        try:
+            inverter_id = int(inverter_id)
+        except ValueError:
+            return jsonify({
+                'success': False,
+                'error': 'Inverter ID must be a valid integer'
+            })
+        
+        # Calculate hex conversion for verification
+        if inverter_id > 0:
+            calculated_hex = f"{inverter_id:08X}"
+        else:
+            calculated_hex = f"{(inverter_id + 2**32):08X}"
+        
+        # TODO: In a production system, you'd want to save this to a database
+        # or configuration file and reload the dashboard
+        return jsonify({
+            'success': True,
+            'message': f'Inverter mapping would be added: {inverter_id} -> {serial}',
+            'calculated_hex': calculated_hex,
+            'note': 'This is a preview. In production, this would update the inverter mapping and require a dashboard restart.'
+        })
+        
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': f'Failed to add inverter mapping: {str(e)}'
+        })
+
+
+@app.route('/api/admin/inverters/convert-hex', methods=['POST'])
+def convert_inverter_hex():
+    """Convert an inverter ID to hex serial format"""
+    try:
+        data = request.get_json()
+        inverter_id = data.get('inverter_id')
+        
+        if not inverter_id:
+            return jsonify({
+                'success': False,
+                'error': 'Inverter ID is required'
+            })
+        
+        try:
+            inverter_id = int(inverter_id)
+        except ValueError:
+            return jsonify({
+                'success': False,
+                'error': 'Inverter ID must be a valid integer'
+            })
+        
+        # Convert to hex
+        if inverter_id > 0:
+            hex_serial = f"{inverter_id:08X}"
+            conversion_type = "Positive ID (direct conversion)"
+        else:
+            hex_serial = f"{(inverter_id + 2**32):08X}"
+            conversion_type = "Negative ID (2's complement conversion)"
+        
+        return jsonify({
+            'success': True,
+            'inverter_id': inverter_id,
+            'hex_serial': hex_serial,
+            'conversion_type': conversion_type
+        })
+        
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': f'Failed to convert inverter ID: {str(e)}'
+        })
+
+
+@app.route('/api/admin/inverters/discover-unknown', methods=['GET'])
+def discover_unknown_inverters():
+    """Discover unknown inverter IDs by fetching current system data"""
+    try:
+        # Get current detailed inverter stats from the dashboard
+        detailed_stats = dashboard._fetch_individual_inverter_data()
+        
+        if not detailed_stats:
+            return jsonify({
+                'success': False,
+                'error': 'Could not fetch current inverter data from system'
+            })
+        
+        # Find unknown inverters (those with "Unknown_" serials)
+        unknown_inverters = []
+        for stats in detailed_stats:
+            if stats['serial'].startswith('Unknown_'):
+                inverter_id = stats['inverter_id']
+                
+                # Calculate what the hex serial should be
+                if inverter_id > 0:
+                    calculated_hex = f"{inverter_id:08X}"
+                    conversion_type = "Positive ID"
+                else:
+                    calculated_hex = f"{(inverter_id + 2**32):08X}"
+                    conversion_type = "Negative ID"
+                
+                unknown_inverters.append({
+                    'inverter_id': inverter_id,
+                    'current_serial': stats['serial'],
+                    'calculated_hex': calculated_hex,
+                    'conversion_type': conversion_type,
+                    'current_power': stats['current_power'],
+                    'max_power_today': stats['max_power'],
+                    'status': stats['status']
+                })
+        
+        return jsonify({
+            'success': True,
+            'unknown_inverters': unknown_inverters,
+            'total_unknown': len(unknown_inverters),
+            'message': f'Found {len(unknown_inverters)} unknown inverter(s)'
+        })
+        
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': f'Failed to discover unknown inverters: {str(e)}'
+        })
+
+
+@app.route('/api/admin/inverters/find-by-serial', methods=['POST'])
+def find_inverter_by_serial():
+    """Find an inverter ID by reverse-calculating from physical serial number"""
+    try:
+        data = request.get_json()
+        physical_serial = data.get('serial', '').strip().upper()
+        
+        if not physical_serial:
+            return jsonify({
+                'success': False,
+                'error': 'Physical serial number is required'
+            })
+        
+        # Validate serial format (8 hex characters)
+        if not re.match(r'^[0-9A-F]{8}$', physical_serial):
+            return jsonify({
+                'success': False,
+                'error': 'Serial must be exactly 8 hexadecimal characters (0-9, A-F)'
+            })
+        
+        # Convert hex serial back to potential inverter IDs
+        hex_value = int(physical_serial, 16)
+        
+        # Two possible interpretations:
+        # 1. Positive ID (direct)
+        positive_id = hex_value
+        
+        # 2. Negative ID (2's complement)
+        negative_id = hex_value - 2**32 if hex_value > 2**31 - 1 else hex_value
+        
+        # Check current system for these IDs
+        detailed_stats = dashboard._fetch_individual_inverter_data()
+        found_matches = []
+        
+        if detailed_stats:
+            for stats in detailed_stats:
+                if stats['inverter_id'] in [positive_id, negative_id]:
+                    found_matches.append({
+                        'inverter_id': stats['inverter_id'],
+                        'current_serial': stats['serial'],
+                        'current_power': stats['current_power'],
+                        'status': stats['status'],
+                        'is_unknown': stats['serial'].startswith('Unknown_')
+                    })
+        
+        return jsonify({
+            'success': True,
+            'physical_serial': physical_serial,
+            'possible_ids': {
+                'positive_interpretation': positive_id,
+                'negative_interpretation': negative_id if negative_id != positive_id else None
+            },
+            'found_in_system': found_matches,
+            'recommendation': (
+                'Found matching inverter in system!' if found_matches else
+                'No matching inverter found in current system data. This may be a new/replacement inverter.'
+            )
+        })
+        
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': f'Failed to find inverter by serial: {str(e)}'
+        })
+
+
+@app.route('/api/admin/inverters/remove', methods=['POST'])
+def remove_inverter_mapping():
+    """Remove an inverter ID mapping (for offline/replaced inverters)"""
+    try:
+        data = request.get_json()
+        inverter_id = data.get('inverter_id')
+        reason = data.get('reason', 'Manual removal')
+        
+        if not inverter_id:
+            return jsonify({
+                'success': False,
+                'error': 'Inverter ID is required'
+            })
+        
+        try:
+            inverter_id = int(inverter_id)
+        except ValueError:
+            return jsonify({
+                'success': False,
+                'error': 'Inverter ID must be a valid integer'
+            })
+        
+        # Get current mapping to show what would be removed
+        current_mapping = {
+            -1863319175: '90F00179',
+            -1863319184: '90F00170',
+            -1863319181: '90F00173',
+            -1863319160: '90F00188',
+            -1863319204: '90F0015C',
+            -1863319143: '90F00199',
+            -1863319173: '90F0017B',
+            -1863319188: '90F0016C',
+            -1863319193: '90F00167',
+            -1863319119: '90F001B1',
+            -1863319163: '90F00185',
+            -1863319114: '90F001B6',
+            -1863319168: '90F00180',
+            -1863319174: '90F0017A',
+            -1863319169: '90F0017F',
+            -1863319121: '90F001AF',
+            -1863319161: '90F00187',
+            -1863319170: '90F0017E',
+            -1863319179: '90F00175',
+            -1863319123: '90F001AD',
+            -1863319078: '90F001DA',
+            -1863319180: '90F00174',
+            -1863319171: '90F0017D',
+            -1053817559: 'C1300529',
+            1093666578: '41300712',
+            1902118887: '716007E7',
+            1902121595: '7160127B',
+        }
+        
+        if inverter_id not in current_mapping:
+            return jsonify({
+                'success': False,
+                'error': f'Inverter ID {inverter_id} not found in current mapping'
+            })
+        
+        serial = current_mapping[inverter_id]
+        
+        # TODO: In production, you'd actually remove this from the mapping
+        # and reload the dashboard
+        return jsonify({
+            'success': True,
+            'message': f'Inverter {inverter_id} (Serial: {serial}) would be removed',
+            'removed_inverter': {
+                'id': inverter_id,
+                'serial': serial,
+                'reason': reason
+            },
+            'note': 'This is a preview. In production, this would update the inverter mapping and require a dashboard restart.'
+        })
+        
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': f'Failed to remove inverter mapping: {str(e)}'
         })
 
 
