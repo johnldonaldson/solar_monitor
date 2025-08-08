@@ -480,8 +480,8 @@ class InverterAlertManager:
 
 🕐 {timing}
 🏠 System: 25 Inverter Solar Array
-🌐 Dashboard: http://localhost:5002
-⚙️ Admin Panel: http://localhost:5002/admin
+🌐 Dashboard: http://solar_monitor:5002
+⚙️ Admin Panel: http://solar_monitor:5002/admin
 
 Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 """

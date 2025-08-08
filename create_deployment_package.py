@@ -119,7 +119,7 @@ INSTALLATION INSTRUCTIONS:
 2. Install Python dependencies: pip install -r requirements.txt
 3. Configure your settings in the JSON config files
 4. Run the dashboard: python enhanced_dashboard.py
-5. Access admin panel at: http://localhost:5000/admin
+5. Access admin panel at: http://solar_monitor:5002/admin
 
 MAIN FEATURES:
 - Enhanced Dashboard with real-time monitoring and adaptive learning

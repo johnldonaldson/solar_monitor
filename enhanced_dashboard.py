@@ -527,8 +527,8 @@ class EnhancedDashboard:
 🔋 Daily Performance: {'✅ Good' if current_data.get('energy_today_kwh', 0) > 10 else '⚠️ Low production'}
 🔧 System Health: {'✅ All systems nominal' if current_data.get('active_inverters', 0) >= 20 else '⚠️ Some inverters offline'}
 
-🌐 Dashboard: http://localhost:5002
-⚙️ Configure alerts: http://localhost:5002/admin
+🌐 Dashboard: http://solar_monitor:5002
+⚙️ Configure alerts: http://solar_monitor:5002/admin
 📅 Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

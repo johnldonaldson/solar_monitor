@@ -110,7 +110,7 @@ def display_usage_instructions():
     print("   - Real-time web interface")
     print("   - Charts and system status")
     print("   - Run: python enhanced_dashboard.py")
-    print("   - Access: http://localhost:5000")
+    print("   - Access: http://solar_monitor:5002")
     
     print("\n4. 📧 Alert Configuration (alert_config.py)")
     print("   - Configure email alerts")

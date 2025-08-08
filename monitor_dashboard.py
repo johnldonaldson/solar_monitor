@@ -11,7 +11,7 @@ from datetime import datetime
 def check_dashboard_status():
     """Check dashboard status and return metrics"""
     try:
-        response = requests.get('http://localhost:5002/debug/status', timeout=5)
+        response = requests.get('http://solar_monitor:5002/debug/status', timeout=5)
         if response.status_code == 200:
             data = response.json()
             return {
@@ -31,7 +31,7 @@ def check_dashboard_status():
 def check_data_freshness():
     """Check if data is being updated regularly"""
     try:
-        response = requests.get('http://localhost:5002/api/current', timeout=5)
+        response = requests.get('http://solar_monitor:5002/api/current', timeout=5)
         if response.status_code == 200:
             data = response.json()
             last_update = data.get('last_update')
