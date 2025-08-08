@@ -39,11 +39,17 @@ def create_deployment_package():
         'inverter_alert_manager.py',
         'alert_config.py',
         
+        # Intelligent Timing and Learning System
+        'intelligent_inverter_timing.py',
+        'timing_intelligence_cli.py',
+        'inverter_timing_intelligence.json',
+        
         # Configuration files
         'alert_config.json',
         'email_config.json',
         'imessage_config.json',
         'alert_state.json',
+        'inverter_config.json',  # Essential for inverter ID to serial mapping
         
         # Web templates
         'templates/dashboard.html',
@@ -116,12 +122,42 @@ INSTALLATION INSTRUCTIONS:
 5. Access admin panel at: http://localhost:5000/admin
 
 MAIN FEATURES:
-- Enhanced Dashboard with real-time monitoring
+- Enhanced Dashboard with real-time monitoring and adaptive learning
+- Fixed units display: Individual inverters show watts (W), system shows kW  
+- Intelligent Timing System that learns inverter wake/sleep patterns
+- Filtered phantom "New_xxxx" entries from timing intelligence
+- Seasonal adaptation to daylight saving time and weather changes
+- Smart alerting that prevents false alarms during natural offline periods
 - Advanced Inverter Analyzer for performance analysis
 - Admin panel for inverter management (add/remove/map)
 - Alert system with email and iMessage notifications
 - Command-line utility for direct inverter management
+- CLI tools for timing intelligence monitoring
 - Comprehensive monitoring and analysis tools
+- Real-time AJAX endpoint integration for accurate power values
+
+NEW INTELLIGENT FEATURES:
+- Adaptive learning from real inverter behavior (not static rules)
+- East/South array classification with confidence scoring
+- Seasonal pattern tracking (winter/spring/summer/fall)
+- Learning progress feedback and recommendations
+- Smart false alert prevention based on learned patterns
+- API endpoints for timing intelligence integration
+- Filtered phantom inverter entries for clean learning data
+
+RECENT FIXES (v2.2):
+- Fixed power value units: Individual inverters display in watts (W)
+- Eliminated phantom "New_xxxx" entries from timing intelligence
+- Improved AJAX endpoint integration for real-time data
+- Enhanced filtering for clean learning dataset
+- Updated dashboard UI to show correct units for 250W panels
+
+CRITICAL CONFIGURATION FILES:
+- inverter_config.json: Essential for mapping inverter IDs to serial numbers
+  Without this file, inverters will show as "INV_xxxxxxx" instead of proper serials
+- alert_config.json: Alert thresholds and notification settings
+- email_config.json: Email credentials for notifications (update before use)
+- inverter_timing_intelligence.json: Learned timing patterns for smart alerts
 """
         
         zipf.writestr("DEPLOYMENT_INFO.txt", deployment_info)

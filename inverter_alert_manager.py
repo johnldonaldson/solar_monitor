@@ -2,6 +2,7 @@
 """
 Intelligent Inverter Alerting System
 Handles sunset-aware alerting for offline/missing inverters
+Enhanced with timing intelligence to prevent false alerts
 """
 
 import json
@@ -57,9 +58,143 @@ def calculate_sunset_time(latitude=37.7749, longitude=-122.4194):
 class InverterAlertManager:
     def __init__(self):
         self.alert_state_file = 'alert_state.json'
+        # Initialize timing intelligence for smart alerting
+        try:
+            from intelligent_inverter_timing import create_timing_intelligence_integration
+            self.timing_intelligence = create_timing_intelligence_integration()
+            print("✅ Timing intelligence loaded for smart alerting")
+        except Exception as e:
+            print(f"⚠️ Could not load timing intelligence: {e}")
+            self.timing_intelligence = None
+    
+    def get_expected_active_inverters(self, current_time):
+        """
+        Get the expected number of active inverters based on timing intelligence
+        Returns tuple: (expected_east, expected_south, reasoning)
+        """
+        if not self.timing_intelligence:
+            # Fallback to simple time-based expectations
+            hour = current_time.hour
+            if 6 <= hour <= 8:
+                return (12, 0, "Early morning - only east array expected")
+            elif 9 <= hour <= 16:
+                return (12, 13, "Midday - both arrays expected active")
+            elif 17 <= hour <= 19:
+                return (0, 13, "Late day - only south array expected")
+            else:
+                return (0, 0, "Night/dawn - no arrays expected active")
+        
+        try:
+            # Get current timing insights
+            insights = self.timing_intelligence['get_insights']()
+            current_hour = current_time.hour
+            
+            # Default expectations
+            expected_east = 0
+            expected_south = 0
+            reasoning = ""
+            
+            # Check learned patterns for each array
+            array_groups = insights.get('array_groups', {})
+            
+            # East array analysis
+            east_data = array_groups.get('east_facing', {})
+            has_east_patterns = east_data.get('typical_wake_time') and east_data.get('count', 0) > 0
+            
+            if has_east_patterns:
+                try:
+                    wake_hour = int(east_data['typical_wake_time'].split(':')[0])
+                    sleep_hour = int(east_data.get('typical_sleep_time', '18:00').split(':')[0])
+                    if wake_hour <= current_hour <= sleep_hour:
+                        expected_east = 12
+                except (ValueError, IndexError):
+                    pass
+            
+            # South array analysis  
+            south_data = array_groups.get('south_facing', {})
+            has_south_patterns = south_data.get('typical_wake_time') and south_data.get('count', 0) > 0
+            
+            if has_south_patterns:
+                try:
+                    wake_hour = int(south_data['typical_wake_time'].split(':')[0])
+                    sleep_hour = int(south_data.get('typical_sleep_time', '19:00').split(':')[0])
+                    if wake_hour <= current_hour <= sleep_hour:
+                        expected_south = 13
+                except (ValueError, IndexError):
+                    pass
+            
+            # If no learned patterns available, use intelligent fallback based on time
+            if not has_east_patterns and not has_south_patterns:
+                # Intelligent fallback based on typical solar patterns
+                if 6 <= current_hour <= 8:
+                    expected_east = 12  # East wakes first
+                    expected_south = 0
+                    reasoning = "Early morning - east array expected (no learned patterns)"
+                elif 9 <= current_hour <= 16:
+                    expected_east = 12  # Both active during midday
+                    expected_south = 13
+                    reasoning = "Midday - both arrays expected (no learned patterns)"
+                elif 17 <= current_hour <= 19:
+                    expected_east = 0  # East may shut down first
+                    expected_south = 13
+                    reasoning = "Late day - south array expected (no learned patterns)"
+                else:
+                    expected_east = 0
+                    expected_south = 0
+                    reasoning = "Night/dawn - no arrays expected (no learned patterns)"
+            else:
+                # Generate reasoning based on learned patterns
+                if expected_east > 0 and expected_south > 0:
+                    reasoning = "Both arrays should be active (learned patterns)"
+                elif expected_east > 0:
+                    reasoning = "Only east array should be active (learned patterns)"
+                elif expected_south > 0:
+                    reasoning = "Only south array should be active (learned patterns)"
+                else:
+                    reasoning = "No arrays expected active (learned patterns)"
+            
+            return (expected_east, expected_south, reasoning)
+            
+        except Exception as e:
+            print(f"⚠️ Error getting timing expectations: {e}")
+            # Fallback to simple logic
+            hour = current_time.hour
+            if 6 <= hour <= 8:
+                return (12, 0, "Early morning fallback")
+            elif 9 <= hour <= 16:
+                return (12, 13, "Midday fallback")
+            elif 17 <= hour <= 19:
+                return (0, 13, "Late day fallback")
+            else:
+                return (0, 0, "Night fallback")
+    
+    def classify_inverter_by_serial(self, serial):
+        """Classify an inverter as east or south facing based on known arrays"""
+        # Known array classifications
+        east_array = {
+            '41300712', '90F001AD', '90F001DA', '90F00174', '90F0017D',
+            '716007E7', '90F00170', '90F00173', '90F00188', '90F0015C',
+            'C1300529', '90F00199'
+        }
+        
+        south_array = {
+            '90F0017B', '7160127B', '90F00167', '90F001B1', '90F00185',
+            '90F001B6', '90F00180', '90F0017A', '90F0017F', '90F001AF',
+            '90F00187', '90F0017E', '90F00175'
+        }
+        
+        if serial in east_array:
+            return 'east'
+        elif serial in south_array:
+            return 'south'
+        else:
+            return 'unknown'
         
     def generate_offline_inverter_alerts(self, detailed_stats, alert_config):
-        """Generate intelligent alerts for offline/missing inverters with sunset awareness"""
+        """
+        Generate intelligent alerts for offline/missing inverters with timing intelligence
+        Prevents false alerts when inverters are naturally offline due to array orientation
+        """
         try:
             alerts = []
             current_time = datetime.now()
@@ -74,80 +209,163 @@ class InverterAlertManager:
             
             if minutes_until_sunset <= sunset_buffer_minutes or minutes_since_sunset >= 0:
                 # We're in the sunset window - normal for inverters to be offline
+                print(f"🌅 Skipping alerts: {minutes_until_sunset:.0f}min to sunset (buffer: {sunset_buffer_minutes}min)")
                 return []
             
-            # Only alert during productive daylight hours (8 AM - sunset buffer)
+            # Only alert during productive daylight hours (7 AM - sunset buffer)
             hour = current_time.hour
-            if hour < 8 or hour > 18:  # Basic daylight hours check
+            if hour < 7 or hour > 19:  # Basic daylight hours check
+                print(f"🌙 Skipping alerts: Outside daylight hours ({hour}:00)")
                 return []
             
-            # Count active vs total inverters
-            active_inverters = len([s for s in detailed_stats if s['current_power'] > 0.01])
-            total_system_inverters = 25  # Known system total
-            detected_inverters = len(detailed_stats)
-            missing_inverters = total_system_inverters - detected_inverters
-            offline_inverters = detected_inverters - active_inverters
+            # Get intelligent expectations based on timing patterns
+            expected_east, expected_south, reasoning = self.get_expected_active_inverters(current_time)
+            expected_total = expected_east + expected_south
             
-            # Configuration thresholds
-            min_active_threshold = alert_config.get('min_active_inverters', 20)
-            max_offline_threshold = alert_config.get('max_offline_inverters', 3)
+            print(f"🧠 Intelligent expectations: East={expected_east}, South={expected_south} ({reasoning})")
             
-            # Generate alerts based on severity
-            if active_inverters < min_active_threshold:
-                severity = "CRITICAL" if active_inverters < 18 else "WARNING"
-                alert_msg = (f"{severity}: Only {active_inverters}/{total_system_inverters} "
-                           f"inverters active during daylight hours")
-                alerts.append({
-                    'type': 'low_active_count',
-                    'severity': severity,
-                    'message': alert_msg,
-                    'active_count': active_inverters,
-                    'total_count': total_system_inverters,
-                    'timestamp': current_time.isoformat()
-                })
+            # Classify current inverters by array
+            east_active = 0
+            south_active = 0
+            east_offline = []
+            south_offline = []
+            unknown_inverters = []
             
-            if missing_inverters > 0:
-                alert_msg = (f"WARNING: {missing_inverters} inverters not detected/reporting "
-                           f"(only {detected_inverters}/25 found)")
+            for inverter in detailed_stats:
+                array_type = self.classify_inverter_by_serial(inverter['serial'])
+                is_active = inverter['current_power'] > 0.01
+                
+                if array_type == 'east':
+                    if is_active:
+                        east_active += 1
+                    else:
+                        east_offline.append(inverter['serial'])
+                elif array_type == 'south':
+                    if is_active:
+                        south_active += 1
+                    else:
+                        south_offline.append(inverter['serial'])
+                else:
+                    unknown_inverters.append(inverter['serial'])
+                    if is_active:
+                        # Count unknown as contributing to totals
+                        if expected_east > 0:
+                            east_active += 1
+                        elif expected_south > 0:
+                            south_active += 1
+            
+            total_active = east_active + south_active
+            total_detected = len(detailed_stats)
+            
+            print(f"📊 Current status: East={east_active}/{expected_east}, South={south_active}/{expected_south}")
+            
+            # Generate smart alerts based on expectations vs reality
+            
+            # 1. Check for missing inverters (fewer detected than expected)
+            expected_detected = 25  # Total system size
+            if total_detected < expected_detected:
+                missing_count = expected_detected - total_detected
+                alert_msg = (f"CRITICAL: {missing_count} inverters not reporting "
+                           f"(only {total_detected}/25 detected)")
                 alerts.append({
                     'type': 'missing_inverters',
-                    'severity': 'WARNING',
+                    'severity': 'CRITICAL',
                     'message': alert_msg,
-                    'missing_count': missing_inverters,
-                    'detected_count': detected_inverters,
-                    'timestamp': current_time.isoformat()
+                    'missing_count': missing_count,
+                    'detected_count': total_detected,
+                    'timestamp': current_time.isoformat(),
+                    'reasoning': 'Physical inverters not responding'
                 })
             
-            if offline_inverters > max_offline_threshold:
-                # List specific offline inverters
-                offline_serials = [s['serial'] for s in detailed_stats 
-                                 if s['current_power'] <= 0.01]
-                alert_msg = (f"WARNING: {offline_inverters} detected inverters offline: "
-                           f"{', '.join(offline_serials[:5])}")
-                if len(offline_serials) > 5:
-                    alert_msg += f" and {len(offline_serials) - 5} more"
+            # 2. Check east array against expectations (only if we expect it to be active)
+            if expected_east > 0:
+                east_missing = max(0, expected_east - east_active)
+                if east_missing >= 3:  # Threshold for east array alerts
+                    severity = "CRITICAL" if east_missing >= 6 else "WARNING"
+                    alert_msg = (f"{severity}: East array underperforming - "
+                               f"only {east_active}/{expected_east} active")
+                    if east_offline:
+                        alert_msg += f". Offline: {', '.join(east_offline[:3])}"
+                        if len(east_offline) > 3:
+                            alert_msg += f" +{len(east_offline) - 3} more"
                     
-                alerts.append({
-                    'type': 'offline_inverters',
-                    'severity': 'WARNING',
-                    'message': alert_msg,
-                    'offline_count': offline_inverters,
-                    'offline_serials': offline_serials,
-                    'timestamp': current_time.isoformat()
-                })
+                    alerts.append({
+                        'type': 'east_array_underperform',
+                        'severity': severity,
+                        'message': alert_msg,
+                        'expected': expected_east,
+                        'actual': east_active,
+                        'offline_serials': east_offline,
+                        'timestamp': current_time.isoformat(),
+                        'reasoning': f'East array expected active at {hour}:00 but underperforming'
+                    })
             
-            # Add timing context to alerts
+            # 3. Check south array against expectations (only if we expect it to be active)
+            if expected_south > 0:
+                south_missing = max(0, expected_south - south_active)
+                if south_missing >= 3:  # Threshold for south array alerts
+                    severity = "CRITICAL" if south_missing >= 7 else "WARNING"
+                    alert_msg = (f"{severity}: South array underperforming - "
+                               f"only {south_active}/{expected_south} active")
+                    if south_offline:
+                        alert_msg += f". Offline: {', '.join(south_offline[:3])}"
+                        if len(south_offline) > 3:
+                            alert_msg += f" +{len(south_offline) - 3} more"
+                    
+                    alerts.append({
+                        'type': 'south_array_underperform',
+                        'severity': severity,
+                        'message': alert_msg,
+                        'expected': expected_south,
+                        'actual': south_active,
+                        'offline_serials': south_offline,
+                        'timestamp': current_time.isoformat(),
+                        'reasoning': f'South array expected active at {hour}:00 but underperforming'
+                    })
+            
+            # 4. Check for overall system underperformance (backup check)
+            if expected_total > 0:
+                performance_ratio = total_active / expected_total
+                if performance_ratio < 0.8:  # Less than 80% of expected
+                    severity = "CRITICAL" if performance_ratio < 0.6 else "WARNING"
+                    alert_msg = (f"{severity}: System underperforming - "
+                               f"only {total_active}/{expected_total} inverters active "
+                               f"({performance_ratio:.1%} of expected)")
+                    
+                    alerts.append({
+                        'type': 'system_underperform',
+                        'severity': severity,
+                        'message': alert_msg,
+                        'expected_total': expected_total,
+                        'actual_total': total_active,
+                        'performance_ratio': performance_ratio,
+                        'timestamp': current_time.isoformat(),
+                        'reasoning': reasoning
+                    })
+            
+            # Add timing context to all alerts
             if alerts:
-                timing_context = f"Alert generated at {current_time.strftime('%H:%M')} "
-                timing_context += f"({minutes_until_sunset:.0f} min until sunset)"
+                timing_context = (f"Alert generated at {current_time.strftime('%H:%M')} "
+                                f"({minutes_until_sunset:.0f} min until sunset). {reasoning}")
                 
-                for alert in alerts:
-                    alert['timing_context'] = timing_context
-                    alert['sunset_buffer_minutes'] = sunset_buffer_minutes
+                for alert_item in alerts:
+                    alert_item['timing_context'] = timing_context
+                    alert_item['sunset_buffer_minutes'] = sunset_buffer_minutes
+                    alert_item['expected_east'] = expected_east
+                    alert_item['expected_south'] = expected_south
+                    alert_item['actual_east'] = east_active
+                    alert_item['actual_south'] = south_active
+            
+            if not alerts:
+                print("✅ No alerts needed - system performing within intelligent expectations")
             
             return alerts
             
         except Exception as e:
+            print(f"❌ Error generating intelligent alerts: {e}")
+            import traceback
+            traceback.print_exc()
+            return []
             print(f"❌ Error generating offline inverter alerts: {e}")
             return []
     

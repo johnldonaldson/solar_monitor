@@ -6,7 +6,7 @@
     <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
-    <title>🔌 Chilicon Solar Dashboard - v2.1 (Timing Added)</title>
+    <title>🔌 Chilicon Solar Dashboard - v2.2 (Units Fixed)</title>
     <style>
         * {
             margin: 0;
@@ -623,21 +623,21 @@
                     const div = document.createElement('div');
                     div.className = 'inverter';
                     
-                    // Power is already in kW, display as kW
-                    const powerKw = stats.current_power || 0;
-                    const isActive = stats.current_power > 0.01; // Active if > 0.01kW
+                    // Power is in watts for individual inverters (250W panels)
+                    const powerW = stats.current_power || 0;
+                    const isActive = stats.current_power > 10; // Active if > 10W
                     
                     div.classList.add(isActive ? 'active' : 'inactive');
                     
                     div.innerHTML = `
                         <div>${stats.serial}</div>
-                        <div>${powerKw.toFixed(3)}kW</div>
+                        <div>${powerW.toFixed(1)}W</div>
                     `;
                     
                     div.title = `Serial: ${stats.serial}
-Current: ${powerKw.toFixed(3)}kW
-Max Today: ${stats.max_power.toFixed(3)}kW
-Avg Power: ${stats.avg_positive_power.toFixed(3)}kW
+Current: ${powerW.toFixed(1)}W
+Max Today: ${stats.max_power.toFixed(1)}W
+Avg Power: ${stats.avg_positive_power.toFixed(1)}W
 Status: ${stats.status}
 Peak Time: ${stats.peak_time}`;
                     
@@ -664,18 +664,18 @@ Peak Time: ${stats.peak_time}`;
                     const div = document.createElement('div');
                     div.className = 'inverter';
                     
-                    // Power is now in kW, not W
-                    const powerKw = inverter.power_w || 0;
-                    const isActive = powerKw > 0.01; // Consider active if > 0.01kW (10W)
+                    // Power is in watts for individual inverters
+                    const powerW = inverter.power_w || 0;
+                    const isActive = powerW > 10; // Consider active if > 10W
                     
                     div.classList.add(isActive ? 'active' : 'inactive');
                     
                     div.innerHTML = `
                         <div>${inverter.serial || 'Unknown'}</div>
-                        <div>${powerKw.toFixed(3)}kW</div>
+                        <div>${powerW.toFixed(1)}W</div>
                     `;
                     
-                    div.title = `Position: ${index + 1}\nSerial: ${inverter.serial || 'Unknown'}\nPower: ${powerKw.toFixed(3)}kW`;
+                    div.title = `Position: ${index + 1}\nSerial: ${inverter.serial || 'Unknown'}\nPower: ${powerW.toFixed(1)}W`;
                     
                     grid.appendChild(div);
                 });
@@ -751,7 +751,7 @@ Peak Time: ${stats.peak_time}`;
                     // Calculate system overview
                     const totalCurrent = stats.reduce((sum, s) => sum + s.current_power, 0);
                     const totalMax = stats.reduce((sum, s) => sum + s.max_power, 0);
-                    const activeCount = stats.filter(s => s.current_power > 0.01).length;
+                    const activeCount = stats.filter(s => s.current_power > 10).length;
                     const totalInverters = 25; // Known system total, not just detected
                     const efficiency = (activeCount / totalInverters * 100).toFixed(1);
                     
@@ -793,7 +793,7 @@ Peak Time: ${stats.peak_time}`;
                             <div class="performer-item">
                                 <span class="performer-rank">#${index + 1}</span>
                                 <span class="performer-serial">${stat.serial}</span>
-                                <span class="performer-power">${stat.current_power.toFixed(3)} kW</span>
+                                <span class="performer-power">${stat.current_power.toFixed(1)}W</span>
                             </div>
                         `;
                     });
@@ -801,7 +801,7 @@ Peak Time: ${stats.peak_time}`;
                     html += '</div></div>';
                     
                     // Problem inverters
-                    const problemInverters = stats.filter(s => s.current_power === 0 || s.avg_positive_power < 0.5);
+                    const problemInverters = stats.filter(s => s.current_power === 0 || s.avg_positive_power < 50);
                     if (problemInverters.length > 0) {
                         html += `
                             <div class="analysis-section">
@@ -815,7 +815,7 @@ Peak Time: ${stats.peak_time}`;
                                 <div class="problem-item">
                                     <span class="performer-serial">${stat.serial}</span>
                                     <span style="color: #dc3545; font-weight: bold;">${status}</span>
-                                    <span class="performer-power">${stat.current_power.toFixed(3)} kW</span>
+                                    <span class="performer-power">${stat.current_power.toFixed(1)}W</span>
                                 </div>
                             `;
                         });

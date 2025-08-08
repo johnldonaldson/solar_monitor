@@ -20,6 +20,7 @@ from flask import Flask, render_template, jsonify, request
 from legacy_chilicon_monitor import ChiliconLegacyMonitor
 from final_microinverter_extractor import MicroinverterPowerExtractor
 from inverter_alert_manager import InverterAlertManager
+from intelligent_inverter_timing import create_timing_intelligence_integration
 
 app = Flask(__name__)
 
@@ -124,6 +125,9 @@ class EnhancedDashboard:
         # Initialize intelligent alert manager
         self.alert_manager = InverterAlertManager()
         
+        # Initialize intelligent timing system
+        self.timing_intelligence = create_timing_intelligence_integration()
+        
         # Debug tracking
         self.debug_info = {
             'thread_start_time': datetime.now().isoformat(),
@@ -143,6 +147,60 @@ class EnhancedDashboard:
         self.daily_report_thread = threading.Thread(target=self.daily_report_scheduler)
         self.daily_report_thread.daemon = True
         self.daily_report_thread.start()
+    
+    def _load_inverter_config(self):
+        """Load inverter configuration from JSON file"""
+        try:
+            config_file = 'inverter_config.json'
+            if not os.path.exists(config_file):
+                print(f"⚠️ Inverter config file not found: {config_file}")
+                return {}
+            
+            with open(config_file, 'r') as f:
+                config = json.load(f)
+            
+            # Convert to simple ID -> serial mapping
+            inverter_map = {}
+            for inverter_id_str, inverter_info in config.get('inverters', {}).items():
+                inverter_id = int(inverter_id_str)
+                inverter_map[inverter_id] = inverter_info['serial']
+            
+            print(f"✅ Loaded {len(inverter_map)} inverters from config")
+            return inverter_map
+            
+        except Exception as e:
+            print(f"❌ Error loading inverter config: {e}")
+            return {}
+    
+    def _save_inverter_config(self, config):
+        """Save inverter configuration to JSON file"""
+        try:
+            config_file = 'inverter_config.json'
+            config['last_updated'] = datetime.now().isoformat()
+            
+            with open(config_file, 'w') as f:
+                json.dump(config, f, indent=2)
+            
+            print(f"✅ Saved inverter configuration")
+            return True
+            
+        except Exception as e:
+            print(f"❌ Error saving inverter config: {e}")
+            return False
+    
+    def get_inverter_config(self):
+        """Get full inverter configuration including array assignments"""
+        try:
+            config_file = 'inverter_config.json'
+            if not os.path.exists(config_file):
+                return {'inverters': {}, 'arrays': {}}
+            
+            with open(config_file, 'r') as f:
+                return json.load(f)
+                
+        except Exception as e:
+            print(f"❌ Error loading inverter config: {e}")
+            return {'inverters': {}, 'arrays': {}}
     
     def background_update(self):
         """Background thread to update data every 15 minutes ONLY with debug logging"""
@@ -587,9 +645,9 @@ Next report will be sent tomorrow after sunset (~{(sunset_time + timedelta(days=
                             'power': stats['current_power'],    # Keep in kW
                             'status': 'active' if stats['current_power'] > 0.01 else 'inactive',
                             'timestamp': datetime.now().isoformat(),
-                            'max_power_today': stats['max_power'],
-                            'avg_power': stats['avg_positive_power'],
-                            'peak_time': stats['peak_time']
+                            'max_power_today': stats.get('max_power', stats['current_power']),
+                            'avg_power': stats.get('avg_positive_power', stats['current_power']),
+                            'peak_time': stats.get('last_reading_time', datetime.now().strftime("%H:%M"))
                         })
                     
                     self.current_data['individual_inverters'] = converted_inverters
@@ -598,6 +656,39 @@ Next report will be sent tomorrow after sunset (~{(sunset_time + timedelta(days=
                     active_count = len([s for s in detailed_stats if s['current_power'] > 0.01])
                     self.current_data['active_inverters'] = active_count
                     print(f"✅ Updated individual inverters: {active_count}/25 active")
+                    
+                    # *** INTELLIGENT TIMING ANALYSIS ***
+                    # Analyze timing patterns and learn from inverter behavior
+                    print("🧠 Analyzing inverter timing patterns...")
+                    try:
+                        # Filter out phantom "New_xxxx" entries before timing analysis
+                        real_stats = [stats for stats in detailed_stats 
+                                    if not stats['serial'].startswith('New_')]
+                        print(f"📊 Filtered timing data: {len(real_stats)}/{len(detailed_stats)} real inverters")
+                        
+                        timing_analysis = self.timing_intelligence['analyze_and_learn'](real_stats)
+                        self.current_data['timing_analysis'] = timing_analysis
+                        
+                        # Log key insights
+                        if timing_analysis.get('anomalies_detected'):
+                            anomaly_count = len(timing_analysis['anomalies_detected'])
+                            print(f"⚠️ Detected {anomaly_count} timing anomalies")
+                        
+                        if timing_analysis.get('patterns_learned'):
+                            pattern_count = len(timing_analysis['patterns_learned'])
+                            print(f"📚 Learned {pattern_count} new timing patterns")
+                        
+                        # Get timing predictions for tomorrow
+                        predictions = self.timing_intelligence['get_predictions']()
+                        self.current_data['wake_predictions'] = predictions
+                        
+                        if predictions.get('east_array_wake'):
+                            print(f"🌅 East array expected to wake at: {predictions['east_array_wake']}")
+                        if predictions.get('south_array_wake'):
+                            print(f"� South array expected to wake at: {predictions['south_array_wake']}")
+                            
+                    except Exception as e:
+                        print(f"⚠️ Timing analysis error: {e}")
                     
                     # *** MISSING ALERT CHECK - ADD THIS ***
                     # Check for alerts after getting detailed stats
@@ -625,210 +716,155 @@ Next report will be sent tomorrow after sunset (~{(sunset_time + timedelta(days=
             return False
 
     def _fetch_individual_inverter_data(self):
-        """Fetch individual inverter power data from Chilicon API"""
+        """Fetch individual inverter power data using AJAX endpoint"""
         try:
-            import requests
-            from collections import defaultdict
+            print("🔍 Fetching individual inverter data from AJAX endpoint...")
             
-            # Today's date for the API call - try current data first
-            today = datetime.now().strftime("%Y-%m-%d")
-            fetchdata_url = f"https://cloud.chiliconpower.com/ajax/fetchData?selection=p_out_avg&lastDay={today}&timeSpan=1&aggregateView=none"
+            # Use the same session from the monitor for authentication
+            if not hasattr(self, '_ajax_session'):
+                # Create session and login if needed
+                monitor = ChiliconLegacyMonitor()
+                if not monitor.login(self.username, self.password):
+                    print("❌ Failed to login for AJAX data")
+                    return []
+                self._ajax_session = monitor.session
             
-            # Known inverter ID mappings (updated with all current inverters)
-            inverter_id_map = {
-                -1863319175: '90F00179',  # Position 0
-                -1863319184: '90F00170',  # Position 1
-                -1863319181: '90F00173',  # Position 2
-                -1863319160: '90F00188',  # Position 3
-                -1863319204: '90F0015C',  # Position 4
-                -1863319143: '90F00199',  # Position 6
-                -1863319173: '90F0017B',  # Position 7
-                -1863319188: '90F0016C',  # Position 8
-                -1863319193: '90F00167',  # Position 9
-                -1863319119: '90F001B1',  # Position 10
-                -1863319163: '90F00185',  # Position 11
-                -1863319114: '90F001B6',  # Position 12
-                -1863319168: '90F00180',  # Position 13
-                -1863319174: '90F0017A',  # Position 14
-                -1863319169: '90F0017F',  # Position 15
-                -1863319121: '90F001AF',  # Position 16
-                -1863319161: '90F00187',  # Position 17
-                -1863319170: '90F0017E',  # Position 18
-                -1863319179: '90F00175',  # Position 19
-                -1863319123: '90F001AD',  # Position 21
-                -1863319078: '90F001DA',  # Position 22
-                -1863319180: '90F00174',  # Position 23
-                -1863319171: '90F0017D',  # Position 24
-                # Replacement inverters
-                -1053817559: 'C1300529',  # Position 5 (replacement)
-                1093666578: '41300712',   # Position 20 (replacement)
-                1902118887: '716007E7',   # New replacement
-                1902121595: '7160127B',   # New replacement
-                # Additional positions (25 total positions expected)
+            # Get today's date in the format expected by the API
+            today = datetime.now().strftime('%Y-%-m-%-d')
+            
+            # AJAX endpoint URL
+            ajax_url = f"https://cloud.chiliconpower.com/ajax/fetchData?selection=p_out_avg&lastDay={today}&timeSpan=1&aggregateView=none"
+            
+            print(f"🌐 Fetching from: {ajax_url}")
+            
+            # Make request with proper headers
+            headers = {
+                'Accept': 'application/json',
+                'X-Requested-With': 'XMLHttpRequest',
+                'Referer': self.installation_url
             }
             
-            # Create session with proper headers
-            session = requests.Session()
-            session.headers.update({
-                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
-                'Accept': '*/*',
-                'Accept-Encoding': 'gzip, deflate, br, zstd',
-                'Accept-Language': 'en-US,en;q=0.9',
-                'Sec-Ch-Ua': '"Google Chrome";v="137", "Chromium";v="137", "Not/A)Brand";v="24"',
-                'Sec-Ch-Ua-Mobile': '?0',
-                'Sec-Ch-Ua-Platform': '"macOS"',
-                'Sec-Fetch-Dest': 'empty',
-                'Sec-Fetch-Mode': 'cors',
-                'Sec-Fetch-Site': 'same-origin',
-                'X-Requested-With': 'XMLHttpRequest'
-            })
-            
-            # Login
-            login_page_url = "https://cloud.chiliconpower.com/login"
-            response = session.get(login_page_url)
-            
-            login_data = {
-                'username': self.username,
-                'password': self.password
-            }
-            
-            response = session.post(login_page_url, data=login_data, allow_redirects=True)
-            
-            if not ("dashboard" in response.url.lower() or "installation" in response.url.lower()):
-                print("❌ Individual inverter data: Login failed")
-                return []
-            
-            # Access installation page for proper session
-            response = session.get(self.installation_url)
-            if response.status_code != 200:
-                print("❌ Individual inverter data: Failed to access installation page")
-                return []
-            
-            # Set referer and fetch data
-            session.headers.update({'Referer': self.installation_url})
-            response = session.get(fetchdata_url)
+            response = self._ajax_session.get(ajax_url, headers=headers)
             
             if response.status_code != 200:
-                print(f"❌ Individual inverter data: Failed to fetch data: {response.status_code}")
+                print(f"❌ AJAX request failed with status {response.status_code}")
                 return []
             
-            # Parse the data
-            data = response.json()
-            print(f"✅ Individual inverter data: Fetched {len(data)} data points")
+            # Parse JSON response
+            try:
+                data = response.json()
+            except Exception as e:
+                print(f"❌ Failed to parse JSON response: {e}")
+                return []
             
-            # If we got very little data, try alternative selections
-            if len(data) < 50:
-                print("🔍 Limited data, trying alternative data selections...")
-                
-                alternative_urls = [
-                    f"https://cloud.chiliconpower.com/ajax/fetchData?selection=p_out_avg&lastDay={today}&timeSpan=1&aggregateView=none",
-                    f"https://cloud.chiliconpower.com/ajax/fetchData?selection=p_out_avg&lastDay={today}&timeSpan=7&aggregateView=none",
-                    f"https://cloud.chiliconpower.com/ajax/fetchData?selection=p_out_cur&lastDay={today}&timeSpan=7&aggregateView=none",
-                ]
-                
-                for alt_url in alternative_urls:
-                    alt_response = session.get(alt_url)
-                    if alt_response.status_code == 200:
-                        alt_data = alt_response.json()
-                        if len(alt_data) > len(data):
-                            print(f"✅ Found better data: {len(alt_data)} data points")
-                            data = alt_data
-                            break
+            if not data:
+                print("❌ Empty response from AJAX endpoint")
+                return []
             
-            # Group data by inverter ID with improved processing
-            inverter_data = defaultdict(list)
-            valid_entries = 0
-            nighttime_entries = 0
+            print(f"✅ Received {len(data)} data points from AJAX endpoint")
             
-            # Get timestamp range for better time processing
-            timestamps = [entry[0] for entry in data if len(entry) >= 3]
+            # Process the data to get latest power values for each inverter
+            inverter_power = {}
             
+            # Data format: [timestamp, power_kw, inverter_id]
             for entry in data:
                 if len(entry) >= 3:
-                    timestamp, power_kw, inverter_id = entry[0], entry[1], entry[2]
+                    timestamp = entry[0]
+                    power_kw = float(entry[1])
+                    inverter_id = entry[2]
                     
-                    # Skip negative power values (nighttime/non-generation)
-                    if power_kw < 0:
-                        nighttime_entries += 1
-                        continue
-                    
-                    # Validate power value (reasonable range for microinverters)
-                    if not (0 <= power_kw <= 2.0):
-                        continue
-                    
-                    # Convert timestamp using improved logic
-                    try:
-                        if timestamps:
-                            timestamp_range = max(timestamps) - min(timestamps)
-                            if timestamp_range > 0:
-                                # Map to hours throughout the day (6 AM to 6 PM)
-                                relative_pos = (timestamp - min(timestamps)) / timestamp_range
-                                hour = int(6 + (12 * relative_pos))  # 6 AM to 6 PM
-                                minute = int((relative_pos * 12 * 60) % 60)
-                                time_str = f"{hour:02d}:{minute:02d}"
-                            else:
-                                time_str = "12:00"  # Default to noon
-                        else:
-                            time_str = str(timestamp)
-                    except (ValueError, OSError):
-                        time_str = str(timestamp)
-                    
-                    # Get inverter serial, handle unknown inverters
-                    serial = inverter_id_map.get(inverter_id, f"New_{abs(inverter_id) % 100000}")
-                    
-                    # Log unknown inverters for potential mapping
-                    if inverter_id not in inverter_id_map:
-                        print(f"🔍 Unknown inverter ID found: {inverter_id} (showing as {serial})")
-                    
-                    inverter_data[inverter_id].append({
-                        'timestamp': timestamp,
-                        'time': time_str,
-                        'power_kw': power_kw,
-                        'serial': serial
-                    })
-                    
-                    valid_entries += 1
+                    # Keep the latest reading for each inverter
+                    if inverter_id not in inverter_power or timestamp > inverter_power[inverter_id]['timestamp']:
+                        inverter_power[inverter_id] = {
+                            'power_kw': power_kw,
+                            'timestamp': timestamp
+                        }
             
-            print(f"✅ Processed {valid_entries} valid entries, {nighttime_entries} nighttime entries")
+            print(f"✅ Found latest power data for {len(inverter_power)} inverters")
             
-            # Analyze each inverter with improved statistics
+            # Create inverter stats using the power values and configuration
             inverter_stats = []
+            config = self.get_inverter_config()
             
-            for inverter_id, readings in inverter_data.items():
-                if not readings:
+            # Map serial numbers to inverter IDs for lookup
+            serial_to_id = {}
+            for inv_id_str, inv_info in config.get('inverters', {}).items():
+                try:
+                    inv_id = int(inv_id_str)
+                    serial_to_id[inv_info['serial']] = {
+                        'id': inv_id,
+                        'array': inv_info['array'],
+                        'position': inv_info['position']
+                    }
+                except (ValueError, KeyError):
                     continue
-                    
-                powers = [r['power_kw'] for r in readings]
-                positive_powers = [p for p in powers if p > 0]
+            
+            # Create stats for each inverter with power data
+            for inverter_id, power_data in inverter_power.items():
+                # Find the serial for this inverter ID
+                serial = None
+                array = 'unknown'
+                position = 0
                 
-                serial = readings[0]['serial']
+                for ser, info in serial_to_id.items():
+                    if info['id'] == inverter_id:
+                        serial = ser
+                        array = info['array']
+                        position = info['position']
+                        break
+                
+                if not serial:
+                    # Create a temporary serial if not found in config
+                    serial = f"INV_{inverter_id}"
+                    print(f"⚠️ Unknown inverter ID {inverter_id}, using temporary serial {serial}")
+                
+                # AJAX endpoint returns power values in watts directly (250W panels)
+                power_watts = float(power_data['power_kw'])  # Already in watts, not kW
+                
+                # Determine status based on power level
+                if power_watts > 10:  # 10W threshold
+                    status = 'active'
+                elif power_watts > 0:
+                    status = 'low_power'
+                else:
+                    status = 'offline'
+                
+                # Convert timestamp to readable time
+                reading_time = datetime.fromtimestamp(power_data['timestamp']).strftime("%H:%M")
                 
                 stats = {
                     'inverter_id': inverter_id,
                     'serial': serial,
-                    'total_readings': len(readings),
-                    'positive_readings': len(positive_powers),
-                    'max_power': max(powers) if powers else 0,
-                    'min_power': min(powers) if powers else 0,
-                    'avg_power': statistics.mean(powers) if powers else 0,
-                    'avg_positive_power': statistics.mean(positive_powers) if positive_powers else 0,
-                    'production_hours': len(positive_powers) * 5 / 60 if positive_powers else 0,
-                    'current_power': powers[-1] if powers else 0,
-                    'peak_time': readings[powers.index(max(powers))]['time'] if powers else 'N/A',
-                    'status': 'Active' if powers and powers[-1] > 0.01 else 'Offline' if powers and powers[-1] == 0 else 'Low Output'
+                    'total_readings': 1,
+                    'positive_readings': 1 if power_watts > 0 else 0,
+                    'max_power': power_watts,
+                    'min_power': power_watts,
+                    'avg_power': power_watts,
+                    'avg_positive_power': power_watts if power_watts > 0 else 0,
+                    'current_power': power_watts,
+                    'last_reading_time': reading_time,
+                    'status': status,
+                    'array': array,
+                    'position': position
                 }
                 
                 inverter_stats.append(stats)
             
-            # Sort by current power output (most active first)
-            inverter_stats.sort(key=lambda x: x['current_power'], reverse=True)
+            # Sort by position for consistent ordering
+            inverter_stats.sort(key=lambda x: x['position'])
             
-            print(f"✅ Processed {len(inverter_stats)} inverters with individual data")
+            print(f"✅ Created stats for {len(inverter_stats)} inverters with AJAX data")
+            
+            # Log some sample data for verification
+            for i, stats in enumerate(inverter_stats[:3]):  # Show first 3
+                print(f"   📊 {stats['serial']}: {stats['current_power']:.1f}W ({stats['status']})")
             
             return inverter_stats
             
         except Exception as e:
-            print(f"❌ Error fetching individual inverter data: {e}")
+            print(f"❌ Error fetching AJAX inverter data: {e}")
+            import traceback
+            traceback.print_exc()
             return []
 
     def get_current_data(self):
@@ -1264,42 +1300,139 @@ def get_sunset_info():
 
 @app.route('/api/admin/inverters', methods=['GET'])
 def get_inverter_mapping():
-    """Get current inverter ID mapping"""
+    """Get current inverter configuration with array assignments"""
     try:
-        # Get the current inverter mapping from the dashboard
-        inverter_id_map = {
-            -1863319175: '90F00179',  # Position 0
-            -1863319184: '90F00170',  # Position 1  
-            -1863319181: '90F00173',  # Position 2
-            -1863319160: '90F00188',  # Position 3
-            -1863319204: '90F0015C',  # Position 4
-            -1863319143: '90F00199',  # Position 6
-            -1863319173: '90F0017B',  # Position 7
-            -1863319188: '90F0016C',  # Position 8
-            -1863319193: '90F00167',  # Position 9
-            -1863319119: '90F001B1',  # Position 10
-            -1863319163: '90F00185',  # Position 11
-            -1863319114: '90F001B6',  # Position 12
-            -1863319168: '90F00180',  # Position 13
-            -1863319174: '90F0017A',  # Position 14
-            -1863319169: '90F0017F',  # Position 15
-            -1863319121: '90F001AF',  # Position 16
-            -1863319161: '90F00187',  # Position 17
-            -1863319170: '90F0017E',  # Position 18
-            -1863319179: '90F00175',  # Position 19
-            -1863319123: '90F001AD',  # Position 21
-            -1863319078: '90F001DA',  # Position 22
-            -1863319180: '90F00174',  # Position 23
-            -1863319171: '90F0017D',  # Position 24
-            # Additional inverter IDs discovered (converted to hex)
-            -1053817559: 'C1300529',  # Position 5 (replacement)
-            1093666578: '41300712',   # Position 20 (replacement)
-            # New replacement inverter IDs (converted to hex)
-            1902118887: '716007E7',  # Replacement inverter
-            1902121595: '7160127B',  # Replacement inverter
-        }
+        # Get the full configuration from file
+        config = dashboard.get_inverter_config()
         
-        # Convert to a more detailed format
+        # Get timing intelligence data
+        timing_file = 'inverter_timing_intelligence.json'
+        timing_data = {}
+        if os.path.exists(timing_file):
+            with open(timing_file, 'r') as f:
+                timing_data = json.load(f)
+        
+        # Format for admin panel
+        inverter_list = []
+        for inverter_id_str, inverter_info in config.get('inverters', {}).items():
+            # Handle both numeric IDs and temporary string IDs
+            if inverter_id_str.startswith('TEMP_'):
+                # For temporary IDs, use the string as-is
+                inverter_id = inverter_id_str
+                is_temp = True
+            else:
+                # For regular numeric IDs, convert to int
+                try:
+                    inverter_id = int(inverter_id_str)
+                    is_temp = False
+                except ValueError:
+                    # Skip invalid IDs
+                    print(f"⚠️ Skipping invalid inverter ID: {inverter_id_str}")
+                    continue
+            
+            # Get learned timing data if available (only for non-temp IDs)
+            learned_orientation = "unknown"
+            reliability_score = 0
+            
+            if not is_temp:
+                for timing in timing_data.get('learned_patterns', {}).values():
+                    if timing.get('inverter_id') == inverter_id:
+                        learned_orientation = timing.get(
+                            'learned_orientation', 'unknown')
+                        reliability_score = timing.get('reliability_score', 0)
+                        break
+                        break
+            
+            # Map array to display format
+            array_display = {
+                'east': 'East Array',
+                'south': 'South Array', 
+                'west': 'West Array'
+            }.get(inverter_info['array'], 'Unknown')
+            
+            # Color coding
+            array_colors = {
+                'East Array': '#FFA500',  # Orange
+                'South Array': '#32CD32',  # Green
+                'West Array': '#FF6347',   # Red
+                'Unknown': '#808080'       # Gray
+            }
+            
+            inverter_list.append({
+                'id': inverter_id,
+                'serial': inverter_info['serial'],
+                'position': inverter_info['position'],
+                'array': inverter_info['array'],
+                'array_assignment': array_display,
+                'array_color': array_colors.get(array_display, '#808080'),
+                'description': inverter_info.get('description', ''),
+                'learned_orientation': learned_orientation,
+                'reliability_score': reliability_score,
+                'status': 'configured'
+            })
+        
+        # Sort by position
+        inverter_list.sort(key=lambda x: x['position'])
+        
+        # Group by array
+        arrays = {}
+        for array_key, array_info in config.get('arrays', {}).items():
+            array_display = {
+                'east': 'East Array',
+                'south': 'South Array',
+                'west': 'West Array'
+            }.get(array_key, array_key)
+            
+            arrays[array_display] = [
+                inv for inv in inverter_list 
+                if inv['array'] == array_key
+            ]
+        
+        return jsonify({
+            'success': True,
+            'inverters': inverter_list,
+            'arrays': arrays,
+            'total_count': len(inverter_list),
+            'array_summary': {
+                'east_count': len([i for i in inverter_list if i['array'] == 'east']),
+                'south_count': len([i for i in inverter_list if i['array'] == 'south']),
+                'west_count': len([i for i in inverter_list if i['array'] == 'west'])
+            }
+        })
+        
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': f'Failed to get inverter configuration: {str(e)}'
+        })
+        
+        # Get timing intelligence insights for array orientation
+        try:
+            # Read timing intelligence data directly from file
+            timing_file = 'inverter_timing_intelligence.json'
+            timing_data = {}
+            if os.path.exists(timing_file):
+                with open(timing_file, 'r') as f:
+                    timing_raw = json.load(f)
+                    # Extract learned patterns for each inverter
+                    patterns = timing_raw.get('inverter_patterns', {})
+                    for serial, inverter_data in patterns.items():
+                        learned = inverter_data.get('learned_pattern', {})
+                        timing_data[serial] = {
+                            'array_orientation': learned.get(
+                                'array_orientation', 'unknown'),
+                            'typical_wake_time': learned.get(
+                                'typical_wake_time', 'Unknown'),
+                            'reliability_score': learned.get(
+                                'reliability_score', 0),
+                            'days_of_data': learned.get('days_of_data', 0)
+                        }
+            print(f"✅ Loaded timing data for {len(timing_data)} inverters")
+        except Exception as e:
+            print(f"⚠️ Could not load timing intelligence data: {e}")
+            timing_data = {}
+        
+        # Convert to a more detailed format with array orientation
         inverter_list = []
         for inverter_id, serial in inverter_id_map.items():
             # Determine inverter type
@@ -1310,21 +1443,67 @@ def get_inverter_mapping():
             else:
                 inverter_type = "Original"
             
+            # Get learned orientation from timing intelligence
+            inverter_timing = timing_data.get(serial, {})
+            learned_orientation = inverter_timing.get(
+                'array_orientation', 'unknown')
+            wake_time = inverter_timing.get('typical_wake_time', 'Unknown')
+            reliability = inverter_timing.get('reliability_score', 0)
+            days_of_data = inverter_timing.get('days_of_data', 0)
+            
+            # Determine array assignment based on learned data
+            if learned_orientation == 'east_facing':
+                array_assignment = 'East Array'
+                array_color = '#FF6B35'  # Orange for east
+            elif learned_orientation == 'south_facing':
+                array_assignment = 'South Array'
+                array_color = '#4ECDC4'  # Teal for south
+            else:
+                array_assignment = 'Unknown'
+                array_color = '#95A5A6'  # Gray for unknown
+            
             inverter_list.append({
                 'id': inverter_id,
                 'serial': serial,
                 'type': inverter_type,
+                'array_assignment': array_assignment,
+                'array_color': array_color,
+                'learned_orientation': learned_orientation,
+                'wake_time': wake_time,
+                'reliability_score': reliability,
+                'days_of_data': days_of_data,
                 'is_positive_id': inverter_id > 0,
-                'hex_calculated': f"{inverter_id:08X}" if inverter_id > 0 else f"{(inverter_id + 2**32):08X}"
+                'hex_calculated': (f"{inverter_id:08X}" if inverter_id > 0
+                                   else f"{(inverter_id + 2**32):08X}")
             })
         
-        # Sort by serial number for consistent display
-        inverter_list.sort(key=lambda x: x['serial'])
+        # Sort by array assignment, then by serial number
+        inverter_list.sort(key=lambda x: (x['array_assignment'], x['serial']))
+        
+        # Group by array for easier display
+        east_array = [inv for inv in inverter_list
+                      if inv['array_assignment'] == 'East Array']
+        south_array = [inv for inv in inverter_list
+                       if inv['array_assignment'] == 'South Array']
+        unknown_array = [inv for inv in inverter_list
+                         if inv['array_assignment'] == 'Unknown']
+        
+        arrays = {
+            'East Array': east_array,
+            'South Array': south_array,
+            'Unknown': unknown_array
+        }
         
         return jsonify({
             'success': True,
             'inverters': inverter_list,
-            'total_count': len(inverter_list)
+            'arrays': arrays,
+            'total_count': len(inverter_list),
+            'array_summary': {
+                'east_count': len(arrays['East Array']),
+                'south_count': len(arrays['South Array']),
+                'unknown_count': len(arrays['Unknown'])
+            }
         })
         
     except Exception as e:
@@ -1334,14 +1513,76 @@ def get_inverter_mapping():
         })
 
 
-@app.route('/api/admin/inverters/add', methods=['POST'])
-def add_inverter_mapping():
-    """Add a new inverter ID mapping"""
+@app.route('/api/admin/inverters/update-array', methods=['POST'])
+def update_inverter_array():
+    """Update an inverter's array assignment"""
     try:
         data = request.get_json()
-        inverter_id = data.get('inverter_id')
+        inverter_id = data.get('id')
+        new_array = data.get('array')
+        
+        if not inverter_id or not new_array:
+            return jsonify({
+                'success': False,
+                'error': 'Inverter ID and array are required'
+            })
+        
+        # Validate array assignment
+        valid_arrays = ['east', 'south', 'west']
+        if new_array not in valid_arrays:
+            return jsonify({
+                'success': False,
+                'error': 'Invalid array. Must be east, south, or west'
+            })
+        
+        # Load current configuration
+        config = dashboard.get_inverter_config()
+        
+        # Update the inverter's array assignment
+        inverter_id_str = str(inverter_id)
+        if inverter_id_str in config.get('inverters', {}):
+            config['inverters'][inverter_id_str]['array'] = new_array
+            config['inverters'][inverter_id_str]['last_updated'] = datetime.now().isoformat()
+            
+            # Update array count
+            for array_key in config.get('arrays', {}):
+                count = len([inv for inv in config['inverters'].values() if inv['array'] == array_key])
+                config['arrays'][array_key]['inverter_count'] = count
+            
+            # Save configuration
+            if dashboard._save_inverter_config(config):
+                return jsonify({
+                    'success': True,
+                    'message': f'Updated inverter {config["inverters"][inverter_id_str]["serial"]} to {new_array} array'
+                })
+            else:
+                return jsonify({
+                    'success': False,
+                    'error': 'Failed to save configuration'
+                })
+        else:
+            return jsonify({
+                'success': False,
+                'error': f'Inverter {inverter_id} not found in configuration'
+            })
+            
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': f'Failed to update inverter array: {str(e)}'
+        })
+
+
+@app.route('/api/admin/inverters/add', methods=['POST'])
+def add_inverter():
+    """Add a new inverter to the configuration"""
+    try:
+        data = request.get_json()
+        inverter_id = data.get('id')
         serial = data.get('serial')
-        inverter_type = data.get('type', 'Manual Addition')
+        array = data.get('array', 'south')
+        position = data.get('position')
+        description = data.get('description', '')
         
         if not inverter_id or not serial:
             return jsonify({
@@ -1349,34 +1590,251 @@ def add_inverter_mapping():
                 'error': 'Inverter ID and serial are required'
             })
         
-        # Validate that it's a proper integer
-        try:
-            inverter_id = int(inverter_id)
-        except ValueError:
+        # Load current configuration
+        config = dashboard.get_inverter_config()
+        
+        # Check if inverter already exists
+        if str(inverter_id) in config.get('inverters', {}):
             return jsonify({
                 'success': False,
-                'error': 'Inverter ID must be a valid integer'
+                'error': f'Inverter {inverter_id} already exists'
             })
         
-        # Calculate hex conversion for verification
-        if inverter_id > 0:
-            calculated_hex = f"{inverter_id:08X}"
-        else:
-            calculated_hex = f"{(inverter_id + 2**32):08X}"
+        # Find next available position if not provided
+        if not position:
+            existing_positions = [inv['position'] for inv in config.get('inverters', {}).values()]
+            position = max(existing_positions, default=0) + 1
         
-        # TODO: In a production system, you'd want to save this to a database
-        # or configuration file and reload the dashboard
+        # Add new inverter
+        config.setdefault('inverters', {})[str(inverter_id)] = {
+            'serial': serial,
+            'position': position,
+            'array': array,
+            'description': description or f"{array.title()}-facing array inverter",
+            'added_date': datetime.now().isoformat()
+        }
+        
+        # Update array count
+        for array_key in config.get('arrays', {}):
+            count = len([inv for inv in config['inverters'].values() if inv['array'] == array_key])
+            config['arrays'][array_key]['inverter_count'] = count
+        
+        # Save configuration
+        if dashboard._save_inverter_config(config):
+            return jsonify({
+                'success': True,
+                'message': f'Added inverter {serial} to {array} array'
+            })
+        else:
+            return jsonify({
+                'success': False,
+                'error': 'Failed to save configuration'
+            })
+            
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': f'Failed to add inverter: {str(e)}'
+        })
+
+
+@app.route('/api/admin/inverters/remove', methods=['POST'])
+def remove_inverter():
+    """Remove an inverter from the configuration"""
+    try:
+        data = request.get_json()
+        inverter_id = data.get('id')
+        
+        if not inverter_id:
+            return jsonify({
+                'success': False,
+                'error': 'Inverter ID is required'
+            })
+        
+        # Load current configuration
+        config = dashboard.get_inverter_config()
+        
+        # Check if inverter exists
+        inverter_id_str = str(inverter_id)
+        if inverter_id_str not in config.get('inverters', {}):
+            return jsonify({
+                'success': False,
+                'error': f'Inverter {inverter_id} not found'
+            })
+        
+        # Get inverter info before removal
+        inverter_info = config['inverters'][inverter_id_str]
+        serial = inverter_info['serial']
+        
+        # Remove inverter
+        del config['inverters'][inverter_id_str]
+        
+        # Update array counts
+        for array_key in config.get('arrays', {}):
+            count = len([inv for inv in config['inverters'].values() if inv['array'] == array_key])
+            config['arrays'][array_key]['inverter_count'] = count
+        
+        # Save configuration
+        if dashboard._save_inverter_config(config):
+            return jsonify({
+                'success': True,
+                'message': f'Removed inverter {serial}'
+            })
+        else:
+            return jsonify({
+                'success': False,
+                'error': 'Failed to save configuration'
+            })
+            
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': f'Failed to remove inverter: {str(e)}'
+        })
+
+
+@app.route('/api/admin/array-groups', methods=['GET'])
+def get_array_groups():
+    """Get detailed array group information"""
+    try:
+        # Get timing intelligence insights
+        insights = dashboard.timing_intelligence['get_insights']()
+        
+        # Get array groups from insights
+        array_groups = insights.get('array_groups', {})
+        timing_summary = insights.get('timing_summary', {})
+        
+        # Enhance with current power data if available
+        current_inverters = dashboard.current_data.get(
+            'individual_inverters', [])
+        current_power_map = {
+            inv['serial']: inv['power'] for inv in current_inverters
+        }
+        
+        enhanced_groups = {}
+        for group_name, group_data in array_groups.items():
+            enhanced_inverters = []
+            total_current_power = 0
+            active_count = 0
+            
+            for serial in group_data.get('inverters', []):
+                timing_info = timing_summary.get(serial, {})
+                current_power = current_power_map.get(serial, 0)
+                
+                if current_power > 0.01:
+                    active_count += 1
+                total_current_power += current_power
+                
+                enhanced_inverters.append({
+                    'serial': serial,
+                    'wake_time': timing_info.get('typical_wake_time',
+                                                 'Unknown'),
+                    'sleep_time': timing_info.get('typical_sleep_time',
+                                                  'Unknown'),
+                    'reliability': timing_info.get('reliability_score', 0),
+                    'days_of_data': timing_info.get('days_of_data', 0),
+                    'current_power': current_power,
+                    'is_active': current_power > 0.01
+                })
+            
+            enhanced_groups[group_name] = {
+                'inverters': enhanced_inverters,
+                'total_inverters': len(enhanced_inverters),
+                'active_inverters': active_count,
+                'total_current_power': round(total_current_power, 3),
+                'average_wake_time': group_data.get(
+                    'typical_wake_time', 'Unknown'),
+                'average_sleep_time': group_data.get(
+                    'typical_sleep_time', 'Unknown'),
+                'group_confidence': group_data.get('confidence_score', 0)
+            }
+        
         return jsonify({
             'success': True,
-            'message': f'Inverter mapping would be added: {inverter_id} -> {serial}',
-            'calculated_hex': calculated_hex,
-            'note': 'This is a preview. In production, this would update the inverter mapping and require a dashboard restart.'
+            'array_groups': enhanced_groups,
+            'learning_status': insights.get('learning_status', {})
         })
         
     except Exception as e:
         return jsonify({
             'success': False,
-            'error': f'Failed to add inverter mapping: {str(e)}'
+            'error': f'Failed to get array groups: {str(e)}'
+        })
+
+
+@app.route('/api/admin/inverters/add-by-serial', methods=['POST'])
+def add_inverter_by_serial():
+    """Add a new inverter by serial number only (practical workflow)"""
+    try:
+        data = request.get_json()
+        serial = data.get('serial', '').strip().upper()
+        array = data.get('array', 'south')
+        description = data.get('description', '')
+        
+        if not serial:
+            return jsonify({
+                'success': False,
+                'error': 'Serial number is required'
+            })
+        
+        if not re.match(r'^[0-9A-F]{8}$', serial):
+            return jsonify({
+                'success': False,
+                'error': ('Serial number must be exactly 8 hexadecimal '
+                          'characters (0-9, A-F)')
+            })
+        
+        # Load current configuration
+        config = dashboard.get_inverter_config()
+        
+        # Check if serial already exists
+        for inv_id, inv_data in config.get('inverters', {}).items():
+            if inv_data.get('serial') == serial:
+                return jsonify({
+                    'success': False,
+                    'error': f'Serial {serial} already exists for ID {inv_id}'
+                })
+        
+        # Create temporary placeholder ID for discovery
+        import time
+        temp_id = f"TEMP_{int(time.time())}"
+        
+        # Find next available position
+        existing_positions = [inv['position']
+                              for inv in config.get('inverters', {}).values()]
+        position = max(existing_positions, default=0) + 1
+        
+        # Add inverter with temporary ID
+        config.setdefault('inverters', {})[temp_id] = {
+            'serial': serial,
+            'position': position,
+            'array': array,
+            'description': (description or
+                            f"New {array} array inverter (awaiting ID)"),
+            'added_date': datetime.now().isoformat(),
+            'status': 'awaiting_discovery',
+            'temp_id': True
+        }
+        
+        # Update config file
+        config['last_updated'] = datetime.now().isoformat()
+        dashboard._save_inverter_config(config)
+        
+        return jsonify({
+            'success': True,
+            'message': f'Inverter added with serial {serial}',
+            'temp_id': temp_id,
+            'serial': serial,
+            'array': array,
+            'position': position,
+            'note': ('This inverter will be linked to its system ID '
+                     'when discovered in Chilicon data')
+        })
+        
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': f'Failed to add inverter by serial: {str(e)}'
         })
 
 
@@ -1564,33 +2022,34 @@ def remove_inverter_mapping():
         
         # Get current mapping to show what would be removed
         current_mapping = {
-            -1863319175: '90F00179',
-            -1863319184: '90F00170',
-            -1863319181: '90F00173',
-            -1863319160: '90F00188',
-            -1863319204: '90F0015C',
-            -1863319143: '90F00199',
-            -1863319173: '90F0017B',
-            -1863319188: '90F0016C',
-            -1863319193: '90F00167',
-            -1863319119: '90F001B1',
-            -1863319163: '90F00185',
-            -1863319114: '90F001B6',
-            -1863319168: '90F00180',
-            -1863319174: '90F0017A',
-            -1863319169: '90F0017F',
-            -1863319121: '90F001AF',
-            -1863319161: '90F00187',
-            -1863319170: '90F0017E',
-            -1863319179: '90F00175',
-            -1863319123: '90F001AD',
-            -1863319078: '90F001DA',
-            -1863319180: '90F00174',
-            -1863319171: '90F0017D',
-            -1053817559: 'C1300529',
-            1093666578: '41300712',
-            1902118887: '716007E7',
-            1902121595: '7160127B',
+            -1863319184: '90F00170',  # Position 1
+            -1863319181: '90F00173',  # Position 2
+            -1863319160: '90F00188',  # Position 3
+            -1863319204: '90F0015C',  # Position 4
+            -1863319143: '90F00199',  # Position 6
+            -1863319173: '90F0017B',  # Position 7
+            -1863319193: '90F00167',  # Position 9
+            -1863319119: '90F001B1',  # Position 10
+            -1863319163: '90F00185',  # Position 11
+            -1863319114: '90F001B6',  # Position 12
+            -1863319168: '90F00180',  # Position 13
+            -1863319174: '90F0017A',  # Position 14
+            -1863319169: '90F0017F',  # Position 15
+            -1863319121: '90F001AF',  # Position 16
+            -1863319161: '90F00187',  # Position 17
+            -1863319170: '90F0017E',  # Position 18
+            -1863319179: '90F00175',  # Position 19
+            -1863319123: '90F001AD',  # Position 21
+            -1863319078: '90F001DA',  # Position 22
+            -1863319180: '90F00174',  # Position 23
+            -1863319171: '90F0017D',  # Position 24
+            -1053817559: 'C1300529',  # Position 5 (replacement)
+            1093666578: '41300712',   # Position 20 (replacement)
+            1902118887: '716007E7',   # New replacement
+            1902121595: '7160127B',   # New replacement
+            # Removed inverters (no longer on system):
+            # -1863319175: '90F00179',  # Position 0 - REMOVED
+            # -1863319188: '90F0016C',  # Position 8 - REMOVED
         }
         
         if inverter_id not in current_mapping:
@@ -1670,6 +2129,184 @@ def api_inverters():
         'last_update': data.get('last_update'),
         'is_online': data.get('is_online', False)
     })
+
+
+@app.route('/api/timing-intelligence')
+def api_timing_intelligence():
+    """Get intelligent timing analysis and insights"""
+    try:
+        # Get timing insights
+        insights = dashboard.timing_intelligence['get_insights']()
+        
+        # Get current timing analysis from cache
+        data = dashboard.get_current_data()
+        timing_analysis = data.get('timing_analysis', {})
+        wake_predictions = data.get('wake_predictions', {})
+        
+        return jsonify({
+            'success': True,
+            'insights': insights,
+            'latest_analysis': timing_analysis,
+            'wake_predictions': wake_predictions,
+            'learning_progress': {
+                'days_analyzed': insights.get('learning_status', {}).get('days_analyzed', 0),
+                'days_required': insights.get('learning_status', {}).get('days_required', 7),
+                'completion_percentage': min(100, round(
+                    (insights.get('learning_status', {}).get('days_analyzed', 0) / 
+                     insights.get('learning_status', {}).get('days_required', 7)) * 100, 1
+                ))
+            }
+        })
+        
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': f'Failed to get timing intelligence: {str(e)}'
+        })
+
+
+@app.route('/api/array-groups')
+def api_array_groups():
+    """Get array group information and timing patterns"""
+    try:
+        insights = dashboard.timing_intelligence['get_insights']()
+        predictions = dashboard.timing_intelligence['get_predictions']()
+        
+        # Enhanced array group data
+        array_groups = insights.get('array_groups', {})
+        enhanced_groups = {}
+        
+        for group_name, group_data in array_groups.items():
+            enhanced_groups[group_name] = {
+                **group_data,
+                'predicted_wake_time': predictions.get(f'{group_name.split("_")[0]}_array_wake'),
+                'group_type': group_name.replace('_', ' ').title(),
+                'is_learned': group_data.get('count', 0) > 0
+            }
+        
+        return jsonify({
+            'success': True,
+            'array_groups': enhanced_groups,
+            'predictions': predictions,
+            'total_inverters_classified': sum(
+                group.get('count', 0) for group in array_groups.values()
+            )
+        })
+        
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': f'Failed to get array groups: {str(e)}'
+        })
+
+
+@app.route('/api/timing-anomalies')
+def api_timing_anomalies():
+    """Get current timing anomalies"""
+    try:
+        data = dashboard.get_current_data()
+        timing_analysis = data.get('timing_analysis', {})
+        anomalies = timing_analysis.get('anomalies_detected', [])
+        
+        # Categorize anomalies
+        categorized = {
+            'high_priority': [a for a in anomalies if a.get('severity') == 'high'],
+            'medium_priority': [a for a in anomalies if a.get('severity') == 'medium'],
+            'all_anomalies': anomalies
+        }
+        
+        return jsonify({
+            'success': True,
+            'anomalies': categorized,
+            'anomaly_count': len(anomalies),
+            'last_analysis': timing_analysis.get('date'),
+            'recommendations': timing_analysis.get('recommendations', [])
+        })
+        
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': f'Failed to get timing anomalies: {str(e)}'
+        })
+
+
+@app.route('/api/debug/raw-website-data')
+def debug_raw_website_data():
+    """Debug endpoint to show raw website data vs our configuration"""
+    try:
+        global chilicon_api
+        if not chilicon_api:
+            return jsonify({'error': 'API not initialized'})
+        
+        # Get the raw individual inverter data
+        individual_data = chilicon_api._fetch_individual_inverter_data()
+        
+        # Load our configuration  
+        config_map = chilicon_api._load_inverter_config()
+        
+        # Extract inverter IDs from raw data
+        website_ids = set()
+        sample_entries = []
+        
+        # Temporarily call the private method to get raw data
+        import requests
+        from collections import defaultdict
+        today = datetime.now().strftime("%Y-%m-%d")
+        fetchdata_url = f"https://cloud.chiliconpower.com/ajax/fetchData?selection=p_out_avg&lastDay={today}&timeSpan=1&aggregateView=none"
+        
+        # Create session and login
+        session = requests.Session()
+        session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36'
+        })
+        
+        # Login
+        login_data = {'username': chilicon_api.username, 'password': chilicon_api.password}
+        response = session.post("https://cloud.chiliconpower.com/login", data=login_data, allow_redirects=True)
+        
+        if "dashboard" in response.url.lower() or "installation" in response.url.lower():
+            # Access installation page
+            session.get(chilicon_api.installation_url)
+            session.headers.update({'Referer': chilicon_api.installation_url})
+            
+            # Fetch raw data
+            response = session.get(fetchdata_url)
+            if response.status_code == 200:
+                raw_data = response.json()
+                
+                for entry in raw_data:
+                    if len(entry) >= 3:
+                        timestamp, power_kw, inverter_id = entry[0], entry[1], entry[2]
+                        website_ids.add(inverter_id)
+                        if len(sample_entries) < 20:  # Sample first 20 entries
+                            sample_entries.append({
+                                'timestamp': timestamp,
+                                'power_kw': power_kw,
+                                'inverter_id': inverter_id,
+                                'configured': inverter_id in config_map,
+                                'serial': config_map.get(inverter_id, f"New_{abs(inverter_id) % 100000}")
+                            })
+                
+                # Analysis
+                configured_ids = set(config_map.keys())
+                missing_from_website = configured_ids - website_ids
+                missing_from_config = website_ids - configured_ids
+                
+                return jsonify({
+                    'success': True,
+                    'raw_data_count': len(raw_data),
+                    'website_inverter_ids': sorted(list(website_ids)),
+                    'configured_inverter_ids': sorted(list(configured_ids)),
+                    'missing_from_website': sorted(list(missing_from_website)),
+                    'missing_from_config': sorted(list(missing_from_config)),
+                    'sample_entries': sample_entries,
+                    'config_map_sample': dict(list(config_map.items())[:10])
+                })
+        
+        return jsonify({'error': 'Login failed'})
+        
+    except Exception as e:
+        return jsonify({'error': str(e)})
 
 
 def run_dashboard(host='0.0.0.0', port=5000, debug=False):

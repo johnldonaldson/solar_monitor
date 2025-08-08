@@ -160,51 +160,37 @@
             
             <div style="margin-bottom: 20px;">
                 <button onclick="loadInverterList()">🔄 Refresh Inverter List</button>
-                <button onclick="discoverUnknownInverters()" style="background: #fd7e14;">🔍 Find Unknown Inverters</button>
                 <button onclick="showAddInverterForm()" style="background: #28a745;">➕ Add New Inverter</button>
             </div>
             
-            <!-- Serial Number Discovery Form -->
-            <div id="serial-discovery-form" style="display: none; background: #fff3cd; padding: 20px; border-radius: 5px; margin-bottom: 20px; border: 1px solid #ffeeba;">
-                <h3>🔍 Find Inverter by Physical Serial Number</h3>
-                <p style="color: #856404; margin-bottom: 15px;">
-                    Enter the physical serial number from the inverter device to find its system ID.
-                    This is useful when you have a replacement inverter and need to map it.
+            <!-- Add New Inverter Form (Serial Number Only) -->
+            <div id="add-inverter-form" style="display: none; background: #e7f3ff; padding: 20px; border-radius: 5px; margin-bottom: 20px; border: 2px solid #17a2b8;">
+                <h3>➕ Add New Inverter</h3>
+                <p style="color: #084c61; margin-bottom: 15px;">
+                    <strong>Enter the serial number from the physical inverter device.</strong><br>
+                    The system will automatically assign an ID and link the inverter when it comes online.
                 </p>
                 <div class="form-group">
-                    <label for="physical-serial">Physical Serial Number:</label>
-                    <input type="text" id="physical-serial" placeholder="e.g., 716007E7" maxlength="8" style="text-transform: uppercase;">
-                    <button onclick="findInverterBySerial()" style="background: #fd7e14; margin-left: 10px;">🔍 Search System</button>
-                </div>
-                <div id="serial-search-results" style="margin-top: 15px;"></div>
-                <div style="margin-top: 15px;">
-                    <button onclick="hideSerialDiscoveryForm()" style="background: #6c757d;">❌ Close</button>
-                </div>
-            </div>
-            
-            <!-- Add New Inverter Form (updated) -->
-            <div id="add-inverter-form" style="display: none; background: #f8f9fa; padding: 20px; border-radius: 5px; margin-bottom: 20px;">
-                <h3>Add New Inverter Mapping</h3>
-                <div style="background: #d1ecf1; padding: 10px; border-radius: 5px; margin-bottom: 15px; border: 1px solid #bee5eb;">
-                    <small style="color: #0c5460;">
-                        <strong>💡 Tip:</strong> If you only have the physical serial number, use "Find Unknown Inverters" or "Find by Serial" first to discover the system ID.
+                    <label for="new-inverter-serial">Physical Serial Number:</label>
+                    <input type="text" id="new-inverter-serial" placeholder="e.g., 90F00170" maxlength="8" style="text-transform: uppercase;">
+                    <small style="color: #666; display: block; margin-top: 5px;">
+                        8-character hex code printed on the inverter device
                     </small>
                 </div>
                 <div class="form-group">
-                    <label for="new-inverter-id">Inverter ID:</label>
-                    <input type="text" id="new-inverter-id" placeholder="e.g., 1902118887 or -1863319175">
-                    <button onclick="convertInverterHex()" style="background: #17a2b8; margin-left: 10px;">Convert to Hex</button>
+                    <label for="new-inverter-array">Array Assignment:</label>
+                    <select id="new-inverter-array">
+                        <option value="south">South Array</option>
+                        <option value="east">East Array</option>
+                    </select>
                 </div>
                 <div class="form-group">
-                    <label for="new-inverter-serial">Serial Number (Hex):</label>
-                    <input type="text" id="new-inverter-serial" placeholder="e.g., 716007E7">
-                    <small style="color: #666; display: block; margin-top: 5px;" id="hex-conversion-info">
-                        Enter the inverter ID above and click "Convert to Hex" to auto-calculate the serial
-                    </small>
+                    <label for="new-inverter-description">Description (optional):</label>
+                    <input type="text" id="new-inverter-description" placeholder="e.g., Replacement for position 3">
                 </div>
                 <div style="margin-top: 15px;">
-                    <button onclick="addInverterMapping()" style="background: #28a745;">✅ Add Mapping</button>
-                    <button onclick="hideAddInverterForm()" style="background: #6c757d;">❌ Cancel</button>
+                    <button onclick="addNewInverter()" style="background: #28a745;">➕ Add Inverter</button>
+                    <button onclick="hideAddInverterForm()" style="background: #6c757d; margin-left: 10px;">❌ Cancel</button>
                 </div>
             </div>
             
@@ -239,6 +225,24 @@
         .inverter-type-new { color: #dc3545; }
         .inverter-id-positive { color: #007bff; }
         .inverter-id-negative { color: #6c757d; }
+        
+        /* Array assignment dropdown styling */
+        .array-select {
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            padding: 4px 8px;
+            font-size: 13px;
+            font-weight: bold;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+        .array-select:hover {
+            border-color: #999;
+        }
+        .array-select:disabled {
+            cursor: not-allowed;
+            opacity: 0.6;
+        }
     </style>
 
     <script>
@@ -399,9 +403,11 @@
 
         // Inverter Management Functions
         function loadInverterList() {
+            console.log('🔄 Loading inverter list...');
             fetch('/api/admin/inverters')
             .then(response => response.json())
             .then(data => {
+                console.log('✅ API response:', data.success);
                 if (data.success) {
                     displayInverterList(data.inverters, data.total_count);
                 } else {
@@ -410,25 +416,40 @@
                 }
             })
             .catch(error => {
-                console.error('Error loading inverters:', error);
+                console.error('❌ Error loading inverters:', error);
                 document.getElementById('inverter-list-container').innerHTML = 
                     '<p style="color: #dc3545;">Error loading inverter list</p>';
             });
         }
 
         function displayInverterList(inverters, totalCount) {
+            // Sort inverters by array (east first, then south), then by position
+            inverters.sort((a, b) => {
+                if (a.array !== b.array) {
+                    // Array order: east first, then south
+                    const arrayOrder = { 'east': 0, 'south': 1 };
+                    return (arrayOrder[a.array] || 99) - (arrayOrder[b.array] || 99);
+                }
+                // Within same array, sort by position
+                return a.position - b.position;
+            });
+
             let html = `
-                <div style="margin-bottom: 10px;">
+                <div style="margin-bottom: 15px;">
                     <strong>📊 Total Inverters: ${totalCount}</strong>
+                    <div style="margin-top: 10px; display: flex; gap: 15px; font-size: 14px;">
+                        <span>🟠 East Array: ${inverters.filter(inv => inv.array === 'east').length}</span>
+                        <span>🔷 South Array: ${inverters.filter(inv => inv.array === 'south').length}</span>
+                    </div>
                 </div>
                 <table class="inverter-table">
                     <thead>
                         <tr>
+                            <th>Position</th>
                             <th>Inverter ID</th>
                             <th>Serial Number</th>
-                            <th>Type</th>
-                            <th>ID Type</th>
-                            <th>Calculated Hex</th>
+                            <th>Array Assignment</th>
+                            <th>Description</th>
                             <th>Actions</th>
                         </tr>
                     </thead>
@@ -436,23 +457,33 @@
             `;
 
             inverters.forEach(inverter => {
-                const typeClass = inverter.type === 'Original' ? 'inverter-type-original' :
-                                 inverter.type === 'Previous Replacement' ? 'inverter-type-previous' :
-                                 'inverter-type-new';
-                
-                const idClass = inverter.is_positive_id ? 'inverter-id-positive' : 'inverter-id-negative';
+                // Array assignment styling based on current array
+                const arrayStyle = `background: ${inverter.array_color}; color: white;`;
                 
                 html += `
                     <tr>
-                        <td class="${idClass}">${inverter.id}</td>
+                        <td style="font-weight: bold;">${inverter.position}</td>
+                        <td style="font-family: monospace; font-size: 12px;">${inverter.id}</td>
                         <td><strong>${inverter.serial}</strong></td>
-                        <td class="${typeClass}">${inverter.type}</td>
-                        <td>${inverter.is_positive_id ? 'Positive' : 'Negative'}</td>
-                        <td style="font-family: monospace;">${inverter.hex_calculated}</td>
                         <td>
-                            <button onclick="removeInverter(${inverter.id}, '${inverter.serial}')" 
-                                    style="background: #dc3545; color: white; padding: 4px 8px; border: none; border-radius: 3px; font-size: 12px; cursor: pointer;" 
-                                    title="Remove this inverter mapping">
+                            <select data-inverter-id="${inverter.id}" 
+                                    onchange="updateInverterArrayByData(this)" 
+                                    class="array-select"
+                                    data-original-value="${inverter.array}"
+                                    style="${arrayStyle}">
+                                <option value="east" ${inverter.array === 'east' ? 'selected' : ''}>🟠 East Array</option>
+                                <option value="south" ${inverter.array === 'south' ? 'selected' : ''}>🔷 South Array</option>
+                            </select>
+                            <div style="font-size: 11px; color: #666; margin-top: 2px;">
+                                Learned: ${inverter.learned_orientation}
+                            </div>
+                        </td>
+                        <td style="font-size: 12px; color: #666;">${inverter.description}</td>
+                        <td>
+                            <button data-inverter-id="${inverter.id}" data-serial="${inverter.serial}" 
+                                    onclick="removeInverterByData(this)" 
+                                    style="background: #dc3545; color: white; padding: 3px 6px; border: none; border-radius: 3px; font-size: 11px; cursor: pointer;" 
+                                    title="Remove inverter from configuration">
                                 🗑️ Remove
                             </button>
                         </td>
@@ -465,11 +496,11 @@
                 </table>
                 <div style="margin-top: 15px; padding: 10px; background: #e7f3ff; border-radius: 5px;">
                     <small>
-                        <strong>Legend:</strong><br>
-                        🟢 <span class="inverter-type-original">Original</span> - Original inverters from installation<br>
-                        🟠 <span class="inverter-type-previous">Previous Replacement</span> - Earlier replacement inverters<br>
-                        🔴 <span class="inverter-type-new">New Replacement</span> - Recently added replacement inverters<br><br>
-                        <strong>ID Types:</strong> Positive IDs are direct hex conversion, Negative IDs use 2's complement
+                        <strong>🎨 Array Colors:</strong> 
+                        <span style="background: #FFA500; color: white; padding: 2px 6px; border-radius: 3px;">🟠 East Array</span>
+                        <span style="background: #32CD32; color: white; padding: 2px 6px; border-radius: 3px;">🔷 South Array</span><br><br>
+                        <strong>📊 Data:</strong> Wake times and reliability learned from actual inverter behavior patterns. 
+                        Click dropdown to change array assignment - changes are saved automatically.
                     </small>
                 </div>
             `;
@@ -478,273 +509,25 @@
         }
 
         function showAddInverterForm() {
+            console.log('➕ Showing add inverter form...');
             document.getElementById('add-inverter-form').style.display = 'block';
-            document.getElementById('new-inverter-id').focus();
+            document.getElementById('new-inverter-serial').focus();
         }
 
         function hideAddInverterForm() {
             document.getElementById('add-inverter-form').style.display = 'none';
-            document.getElementById('new-inverter-id').value = '';
             document.getElementById('new-inverter-serial').value = '';
-            document.getElementById('hex-conversion-info').textContent = 
-                'Enter the inverter ID above and click "Convert to Hex" to auto-calculate the serial';
+            document.getElementById('new-inverter-array').value = 'south';
+            document.getElementById('new-inverter-description').value = '';
         }
 
-        function discoverUnknownInverters() {
-            document.getElementById('serial-discovery-form').style.display = 'block';
-            
-            fetch('/api/admin/inverters/discover-unknown')
-            .then(response => response.json())
-            .then(data => {
-                if (data.success) {
-                    if (data.total_unknown > 0) {
-                        let html = `
-                            <div style="background: #f8d7da; padding: 15px; border-radius: 5px; border: 1px solid #f5c6cb;">
-                                <h4 style="color: #721c24; margin-top: 0;">⚠️ Found ${data.total_unknown} Unknown Inverter(s)</h4>
-                                <p style="color: #721c24;">These inverters are currently showing as "Unknown_" in the system:</p>
-                                <table style="width: 100%; border-collapse: collapse; margin-top: 10px;">
-                                    <thead>
-                                        <tr style="background: #f5c6cb;">
-                                            <th style="padding: 8px; border: 1px solid #f1aeb5; text-align: left;">System ID</th>
-                                            <th style="padding: 8px; border: 1px solid #f1aeb5; text-align: left;">Calculated Serial</th>
-                                            <th style="padding: 8px; border: 1px solid #f1aeb5; text-align: left;">Current Power</th>
-                                            <th style="padding: 8px; border: 1px solid #f1aeb5; text-align: left;">Status</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody>
-                        `;
-                        
-                        data.unknown_inverters.forEach(inv => {
-                            html += `
-                                <tr>
-                                    <td style="padding: 8px; border: 1px solid #f1aeb5; font-family: monospace;">${inv.inverter_id}</td>
-                                    <td style="padding: 8px; border: 1px solid #f1aeb5; font-family: monospace; font-weight: bold;">${inv.calculated_hex}</td>
-                                    <td style="padding: 8px; border: 1px solid #f1aeb5;">${inv.current_power.toFixed(3)} kW</td>
-                                    <td style="padding: 8px; border: 1px solid #f1aeb5;">${inv.status}</td>
-                                </tr>
-                            `;
-                        });
-                        
-                        html += `
-                                    </tbody>
-                                </table>
-                                <p style="color: #721c24; margin-bottom: 0; margin-top: 15px;">
-                                    <strong>Next Steps:</strong> Compare the "Calculated Serial" with the physical serial numbers 
-                                    on your replacement inverters to create the correct mappings.
-                                </p>
-                            </div>
-                        `;
-                        
-                        document.getElementById('serial-search-results').innerHTML = html;
-                    } else {
-                        document.getElementById('serial-search-results').innerHTML = `
-                            <div style="background: #d4edda; padding: 15px; border-radius: 5px; border: 1px solid #c3e6cb;">
-                                <h4 style="color: #155724; margin-top: 0;">✅ All Inverters Identified</h4>
-                                <p style="color: #155724; margin-bottom: 0;">
-                                    Great! All inverters in the system have been properly mapped. No unknown inverters found.
-                                </p>
-                            </div>
-                        `;
-                    }
-                } else {
-                    document.getElementById('serial-search-results').innerHTML = `
-                        <div style="background: #f8d7da; padding: 15px; border-radius: 5px; border: 1px solid #f5c6cb;">
-                            <p style="color: #721c24; margin-bottom: 0;">❌ Error: ${data.error}</p>
-                        </div>
-                    `;
-                }
-            })
-            .catch(error => {
-                console.error('Error discovering unknown inverters:', error);
-            });
-        }
-
-        function hideSerialDiscoveryForm() {
-            document.getElementById('serial-discovery-form').style.display = 'none';
-            document.getElementById('physical-serial').value = '';
-            document.getElementById('serial-search-results').innerHTML = '';
-        }
-
-        function findInverterBySerial() {
-            const physicalSerial = document.getElementById('physical-serial').value.trim().toUpperCase();
-            
-            if (!physicalSerial) {
-                alert('Please enter a physical serial number');
-                return;
-            }
-
-            if (!/^[0-9A-F]{8}$/.test(physicalSerial)) {
-                alert('Serial number must be exactly 8 hexadecimal characters (0-9, A-F)');
-                return;
-            }
-
-            fetch('/api/admin/inverters/find-by-serial', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({serial: physicalSerial})
-            })
-            .then(response => response.json())
-            .then(data => {
-                if (data.success) {
-                    let html = `
-                        <div style="background: #d1ecf1; padding: 15px; border-radius: 5px; border: 1px solid #bee5eb;">
-                            <h4 style="color: #0c5460; margin-top: 0;">🔍 Search Results for Serial: ${data.physical_serial}</h4>
-                            
-                            <h5 style="color: #0c5460;">Possible System IDs:</h5>
-                            <ul style="color: #0c5460;">
-                                <li><strong>Positive Interpretation:</strong> ${data.possible_ids.positive_interpretation}</li>
-                    `;
-                    
-                    if (data.possible_ids.negative_interpretation !== null) {
-                        html += `<li><strong>Negative Interpretation:</strong> ${data.possible_ids.negative_interpretation}</li>`;
-                    }
-                    
-                    html += `</ul>`;
-                    
-                    if (data.found_in_system.length > 0) {
-                        html += `
-                            <h5 style="color: #0c5460;">Found in Current System:</h5>
-                            <table style="width: 100%; border-collapse: collapse; margin-top: 10px;">
-                                <thead>
-                                    <tr style="background: #bee5eb;">
-                                        <th style="padding: 8px; border: 1px solid #a6d5db; text-align: left;">System ID</th>
-                                        <th style="padding: 8px; border: 1px solid #a6d5db; text-align: left;">Current Serial</th>
-                                        <th style="padding: 8px; border: 1px solid #a6d5db; text-align: left;">Power</th>
-                                        <th style="padding: 8px; border: 1px solid #a6d5db; text-align: left;">Status</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                        `;
-                        
-                        data.found_in_system.forEach(inv => {
-                            const rowColor = inv.is_unknown ? '#fff3cd' : '#d4edda';
-                            html += `
-                                <tr style="background: ${rowColor};">
-                                    <td style="padding: 8px; border: 1px solid #a6d5db; font-family: monospace;">${inv.inverter_id}</td>
-                                    <td style="padding: 8px; border: 1px solid #a6d5db; font-family: monospace;">${inv.current_serial}</td>
-                                    <td style="padding: 8px; border: 1px solid #a6d5db;">${inv.current_power.toFixed(3)} kW</td>
-                                    <td style="padding: 8px; border: 1px solid #a6d5db;">${inv.status}</td>
-                                </tr>
-                            `;
-                        });
-                        
-                        html += `
-                                </tbody>
-                            </table>
-                        `;
-                        
-                        // If found an unknown inverter, offer to map it
-                        const unknownMatch = data.found_in_system.find(inv => inv.is_unknown);
-                        if (unknownMatch) {
-                            html += `
-                                <div style="margin-top: 15px; padding: 10px; background: #fff3cd; border-radius: 5px;">
-                                    <p style="color: #856404; margin-bottom: 10px;">
-                                        <strong>🎯 Match Found!</strong> This serial appears to match inverter ID ${unknownMatch.inverter_id} 
-                                        which is currently showing as unknown.
-                                    </p>
-                                    <button onclick="quickAddMapping(${unknownMatch.inverter_id}, '${physicalSerial}')" 
-                                            style="background: #28a745; color: white; padding: 8px 16px; border: none; border-radius: 3px; cursor: pointer;">
-                                        ✅ Map This Inverter
-                                    </button>
-                                </div>
-                            `;
-                        }
-                    } else {
-                        html += `
-                            <div style="background: #fff3cd; padding: 10px; border-radius: 5px; margin-top: 10px;">
-                                <p style="color: #856404; margin-bottom: 0;">
-                                    ℹ️ ${data.recommendation}
-                                </p>
-                            </div>
-                        `;
-                    }
-                    
-                    html += `</div>`;
-                    document.getElementById('serial-search-results').innerHTML = html;
-                } else {
-                    document.getElementById('serial-search-results').innerHTML = `
-                        <div style="background: #f8d7da; padding: 15px; border-radius: 5px; border: 1px solid #f5c6cb;">
-                            <p style="color: #721c24; margin-bottom: 0;">❌ Error: ${data.error}</p>
-                        </div>
-                    `;
-                }
-            })
-            .catch(error => {
-                console.error('Error finding inverter by serial:', error);
-                document.getElementById('serial-search-results').innerHTML = `
-                    <div style="background: #f8d7da; padding: 15px; border-radius: 5px; border: 1px solid #f5c6cb;">
-                        <p style="color: #721c24; margin-bottom: 0;">❌ Error searching for inverter</p>
-                    </div>
-                `;
-            });
-        }
-
-        function quickAddMapping(inverterId, serial) {
-            if (confirm(`Add mapping for Inverter ID ${inverterId} -> Serial ${serial}?`)) {
-                fetch('/api/admin/inverters/add', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({
-                        inverter_id: inverterId,
-                        serial: serial,
-                        type: 'Discovered Replacement'
-                    })
-                })
-                .then(response => response.json())
-                .then(data => {
-                    if (data.success) {
-                        alert(`✅ ${data.message}\n\n⚠️ ${data.note}`);
-                        hideSerialDiscoveryForm();
-                        loadInverterList(); // Refresh the list
-                    } else {
-                        alert(`❌ Error: ${data.error}`);
-                    }
-                })
-                .catch(error => {
-                    console.error('Error adding mapping:', error);
-                    alert('❌ Error adding inverter mapping');
-                });
-            }
-        }
-
-        function convertInverterHex() {
-            const inverterId = document.getElementById('new-inverter-id').value.trim();
-            
-            if (!inverterId) {
-                alert('Please enter an inverter ID first');
-                return;
-            }
-
-            fetch('/api/admin/inverters/convert-hex', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({inverter_id: inverterId})
-            })
-            .then(response => response.json())
-            .then(data => {
-                if (data.success) {
-                    document.getElementById('new-inverter-serial').value = data.hex_serial;
-                    document.getElementById('hex-conversion-info').innerHTML = 
-                        `✅ <strong>${data.conversion_type}</strong><br>ID: ${data.inverter_id} → Serial: ${data.hex_serial}`;
-                    document.getElementById('hex-conversion-info').style.color = '#28a745';
-                } else {
-                    document.getElementById('hex-conversion-info').innerHTML = `❌ Error: ${data.error}`;
-                    document.getElementById('hex-conversion-info').style.color = '#dc3545';
-                }
-            })
-            .catch(error => {
-                console.error('Error converting hex:', error);
-                document.getElementById('hex-conversion-info').innerHTML = '❌ Error converting inverter ID';
-                document.getElementById('hex-conversion-info').style.color = '#dc3545';
-            });
-        }
-
-        function addInverterMapping() {
-            const inverterId = document.getElementById('new-inverter-id').value.trim();
+        function addNewInverter() {
             const serial = document.getElementById('new-inverter-serial').value.trim().toUpperCase();
+            const array = document.getElementById('new-inverter-array').value;
+            const description = document.getElementById('new-inverter-description').value.trim();
 
-            if (!inverterId || !serial) {
-                alert('Please enter both Inverter ID and Serial Number');
+            if (!serial) {
+                alert('Please enter a serial number');
                 return;
             }
 
@@ -753,33 +536,114 @@
                 return;
             }
 
-            fetch('/api/admin/inverters/add', {
+            if (confirm(`Add new inverter with serial ${serial} to ${array} array?`)) {
+                fetch('/api/admin/inverters/add-by-serial', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        serial: serial,
+                        array: array,
+                        description: description
+                    })
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        alert(`✅ ${data.message}\n\nArray: ${data.array}\nPosition: ${data.position}\n\n💡 ${data.note}`);
+                        hideAddInverterForm();
+                        loadInverterList(); // Refresh the list
+                    } else {
+                        alert(`❌ Error: ${data.error}`);
+                    }
+                })
+                .catch(error => {
+                    console.error('Error adding inverter:', error);
+                    alert(`❌ Error: ${error.message}`);
+                });
+            }
+        }
+
+        function updateInverterArrayByData(selectElement) {
+            const inverterId = selectElement.getAttribute('data-inverter-id');
+            const newArray = selectElement.value;
+            updateInverterArray(inverterId, newArray, selectElement);
+        }
+
+        function updateInverterArray(inverterId, newArray, selectElement = null) {
+            // Get the select element from parameter or find it by data attribute
+            if (!selectElement) {
+                selectElement = document.querySelector(`select[data-inverter-id="${inverterId}"]`);
+            }
+            
+            if (!selectElement) {
+                alert('❌ Error: Could not find select element');
+                return;
+            }
+            
+            const originalValue = selectElement.dataset.originalValue || selectElement.value;
+            selectElement.disabled = true;
+            selectElement.style.opacity = '0.6';
+            
+            fetch('/api/admin/inverters/update-array', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({
-                    inverter_id: inverterId,
-                    serial: serial,
-                    type: 'Manual Addition'
+                    id: inverterId,
+                    array: newArray
                 })
             })
             .then(response => response.json())
             .then(data => {
                 if (data.success) {
-                    alert(`✅ ${data.message}\n\nCalculated Hex: ${data.calculated_hex}\n\n⚠️ ${data.note}`);
-                    hideAddInverterForm();
-                    // In a production system, you'd reload the inverter list here
-                    // loadInverterList();
+                    // Update the styling based on new assignment
+                    const arrayColors = {
+                        'east': '#FFA500',
+                        'south': '#32CD32', 
+                        'west': '#FF6347'
+                    };
+                    const newColor = arrayColors[newArray] || '#808080';
+                    selectElement.style.cssText = `padding: 4px 8px; border-radius: 4px; border: 1px solid #ddd; background: ${newColor}; color: white;`;
+                    selectElement.dataset.originalValue = newArray;
+                    
+                    // Show success feedback briefly
+                    const originalText = selectElement.options[selectElement.selectedIndex].textContent;
+                    selectElement.options[selectElement.selectedIndex].textContent = '✅ Saved!';
+                    setTimeout(() => {
+                        selectElement.options[selectElement.selectedIndex].textContent = originalText;
+                    }, 1500);
+                    
+                    // Update the array counts in the header
+                    setTimeout(() => {
+                        loadInverterList(); // Refresh to get updated counts
+                    }, 2000);
                 } else {
-                    alert(`❌ Error: ${data.error}`);
+                    // Revert to original value on error
+                    selectElement.value = originalValue;
+                    alert(`❌ Error updating array assignment: ${data.error}`);
                 }
             })
             .catch(error => {
-                console.error('Error adding inverter:', error);
-                alert('❌ Error adding inverter mapping');
+                console.error('Error updating inverter array:', error);
+                selectElement.value = originalValue;
+                alert('❌ Error updating array assignment');
+            })
+            .finally(() => {
+                // Re-enable the select
+                selectElement.disabled = false;
+                selectElement.style.opacity = '1';
             });
         }
 
+        function removeInverterByData(buttonElement) {
+            const inverterId = buttonElement.getAttribute('data-inverter-id');
+            const serial = buttonElement.getAttribute('data-serial');
+            removeInverter(inverterId, serial);
+        }
+
         function removeInverter(inverterId, serial) {
+            console.log('🔧 DEBUG: removeInverter called with:', { inverterId, serial });
+            console.log('🔧 DEBUG: Types:', { idType: typeof inverterId, serialType: typeof serial });
+            
             // Ask for confirmation and reason
             const reason = prompt(
                 `⚠️ Remove Inverter Mapping?\n\n` +
@@ -791,6 +655,7 @@
             );
 
             if (!reason) {
+                console.log('🔧 DEBUG: User cancelled - no reason provided');
                 return; // User cancelled
             }
 
@@ -807,35 +672,36 @@
                 `This action will remove the inverter from the mapping.\n` +
                 `Continue?`
             )) {
+                console.log('🔧 DEBUG: User cancelled final confirmation');
                 return;
             }
+
+            console.log('🔧 DEBUG: About to call API with:', { id: inverterId, reason: reason.trim() });
 
             fetch('/api/admin/inverters/remove', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({
-                    inverter_id: inverterId,
+                    id: inverterId,  // Send ID as-is (string or number)
                     reason: reason.trim()
                 })
             })
-            .then(response => response.json())
+            .then(response => {
+                console.log('🔧 DEBUG: API response status:', response.status);
+                return response.json();
+            })
             .then(data => {
+                console.log('🔧 DEBUG: API response data:', data);
                 if (data.success) {
-                    alert(
-                        `✅ ${data.message}\n\n` +
-                        `Removed: ID ${data.removed_inverter.id} (${data.removed_inverter.serial})\n` +
-                        `Reason: ${data.removed_inverter.reason}\n\n` +
-                        `⚠️ ${data.note}`
-                    );
-                    
-                    // In a production system, you'd reload the inverter list here
-                    // loadInverterList();
+                    alert(`✅ ${data.message}`);
+                    loadInverterList(); // Refresh the list
                 } else {
                     alert(`❌ Error: ${data.error}`);
+                    console.error('Remove inverter error:', data);
                 }
             })
             .catch(error => {
-                console.error('Error removing inverter:', error);
+                console.error('❌ Error removing inverter:', error);
                 alert('❌ Error removing inverter mapping');
             });
         }
