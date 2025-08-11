@@ -539,7 +539,11 @@ Next report will be sent tomorrow after sunset (~{(sunset_time + timedelta(days=
             # Send email
             msg = MIMEText(report_body)
             msg['Subject'] = f'🌇 End-of-Day Solar Report - {datetime.now().strftime("%m/%d/%Y")}'
-            msg['From'] = config['smtp_username']
+            
+            # Use display name if available
+            display_name = config.get('display_name', 'Solar Monitor')
+            from_email = config['smtp_username']
+            msg['From'] = f"{display_name} <{from_email}>"
             msg['To'] = config['email']
             
             server = smtplib.SMTP(config['smtp_server'], int(config['smtp_port']))

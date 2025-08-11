@@ -408,7 +408,11 @@ class InverterAlertManager:
             # Create email
             msg = MIMEText(detailed_msg)
             msg['Subject'] = f'🚨 {severity}: Solar System Alert - {datetime.now().strftime("%H:%M")}'
-            msg['From'] = config['smtp_username']
+            
+            # Use display name if available, otherwise fall back to smtp_username
+            display_name = config.get('display_name', 'Solar Monitor')
+            from_email = config['smtp_username']
+            msg['From'] = f"{display_name} <{from_email}>"
             msg['To'] = config['email']
             
             # Send email

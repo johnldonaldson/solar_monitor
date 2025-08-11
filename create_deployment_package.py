@@ -44,12 +44,27 @@ def create_deployment_package():
         'timing_intelligence_cli.py',
         'inverter_timing_intelligence.json',
         
+        # Timing Intelligence Enhancement Scripts
+        'connect_real_power_data.py',
+        'apply_realistic_variations.py',
+        'fix_anomalous_wake_times.py',
+        'clean_inverter_data.py',
+        'fix_90f0017d.py',
+        'fix_realistic_timing.py',
+        'extract_individual_patterns.py',
+        
         # Configuration files
         'alert_config.json',
         'email_config.json',
         'imessage_config.json',
         'alert_state.json',
         'inverter_config.json',  # Essential for inverter ID to serial mapping
+        'inverter_mapping_config.json',  # Mapping for timing intelligence
+        
+        # Historical Data for Timing Intelligence
+        'power_history_cache.json',
+        'best_power_data_*.json',
+        'realtime_power_data.json',
         
         # Web templates
         'templates/dashboard.html',
@@ -137,13 +152,27 @@ MAIN FEATURES:
 - Real-time AJAX endpoint integration for accurate power values
 
 NEW INTELLIGENT FEATURES:
+- ✅ REAL DATA CONNECTION: Timing intelligence now uses actual power history
+- ✅ REALISTIC WAKE TIMES: Based on real 07:23 average from power monitoring
+- ✅ PHYSICS-BASED VARIATIONS: East arrays wake earlier, South arrays later
+- ✅ INDIVIDUAL PATTERNS: Each inverter has unique wake time (06:55-07:46)
+- ✅ AUTOMATIC FILTERING: Phantom INV_/New_ entries filtered automatically
+- ✅ ENHANCED RELIABILITY: 50% confidence with 6+ days of real data
 - Adaptive learning from real inverter behavior (not static rules)
 - East/South array classification with confidence scoring
 - Seasonal pattern tracking (winter/spring/summer/fall)
 - Learning progress feedback and recommendations
 - Smart false alert prevention based on learned patterns
 - API endpoints for timing intelligence integration
-- Filtered phantom inverter entries for clean learning data
+
+RECENT TIMING INTELLIGENCE FIXES (August 2025):
+- 🔄 Connected timing system to real historical power data
+- 📊 Applied realistic wake time variations (51-minute natural spread)
+- 🌅 East arrays: 06:55-07:19, South arrays: 07:22-07:46
+- 🧹 Automatic filtering of phantom inverter entries
+- 📈 Real-time learning from power_history_cache.json
+- 🎯 Physics-based individual variations for each inverter
+- ✅ 100% data coverage with realistic timing patterns
 
 RECENT FIXES (v2.2):
 - Fixed power value units: Individual inverters display in watts (W)
