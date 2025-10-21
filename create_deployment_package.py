@@ -14,84 +14,38 @@ def create_deployment_package():
     
     # Define the files to include
     required_files = [
-        # Core Dashboard and API files
+        # Core runtime modules
         'enhanced_dashboard.py',
-        'enhanced_dashboard_backup.py',
-        
-        # Analysis and Monitoring Tools
-        'advanced_inverter_analyzer.py',
-        'advanced_realtime_extractor.py',
-        'advanced_microinverter_hunter.py',
-        'inverter_management_utility.py',
-        'monitor_dashboard.py',
-        'continuous_power_monitor.py',
-        'complete_monitor_service.py',
-        
-        # Legacy monitoring tools (for compatibility)
+        'inverter_alert_manager.py',
         'legacy_chilicon_monitor.py',
         'final_microinverter_extractor.py',
-        'chilicon_monitor.py',
-        'chilicon_scraper.py',
-        'chilicon_http_scraper.py',
-        'chilicon_api_client.py',
-        
-        # Alert and notification system
-        'inverter_alert_manager.py',
-        'alert_config.py',
-        
-        # Intelligent Timing and Learning System
         'intelligent_inverter_timing.py',
-        'timing_intelligence_cli.py',
-        'inverter_timing_intelligence.json',
-        
-        # Timing Intelligence Enhancement Scripts
-        'connect_real_power_data.py',
-        'apply_realistic_variations.py',
-        'fix_anomalous_wake_times.py',
-        'clean_inverter_data.py',
-        'fix_90f0017d.py',
-        'fix_realistic_timing.py',
-        'extract_individual_patterns.py',
-        
-        # Configuration files
+
+        # Runtime configuration/state
         'alert_config.json',
         'email_config.json',
         'imessage_config.json',
         'alert_state.json',
-        'inverter_config.json',  # Essential for inverter ID to serial mapping
-        'inverter_mapping_config.json',  # Mapping for timing intelligence
-        
-        # Historical Data for Timing Intelligence
+        'inverter_config.json',
+        'inverter_mapping_config.json',
+        'inverter_timing_intelligence.json',
         'power_history_cache.json',
-        'best_power_data_*.json',
-        'realtime_power_data.json',
-        
-        # Web templates
+
+        # Web assets
         'templates/dashboard.html',
         'templates/admin.html',
-        
-        # Analysis and utility scripts
-        'enhanced_array_monitor.py',
-        'enhanced_chilicon_api.py',
-        'array_analysis_summary.py',
-        'clean_power_history.py',
-        'automated_monitor.py',
-        
-        # Installation and deployment
+
+        # Deployment utilities
         'requirements.txt',
         'install.sh',
         'chilicon-monitor.sh',
-        
+
         # Documentation
         'DEPLOYMENT_README.md',
         'README.md',
-        'DASHBOARD_ZERO_POWER_FIX.md',
-        'INVERTER_MAPPING_SUMMARY.md',
-        'INVERTER_MANAGEMENT_SYSTEM.md',
-        'SYSTEM_STATUS_SUMMARY.md',
         'FINAL_STATUS_REPORT.md',
-        
-        # VSCode configuration (for development)
+
+        # Development helpers
         '.vscode/tasks.json'
     ]
     
@@ -138,7 +92,7 @@ INSTALLATION INSTRUCTIONS:
 
 MAIN FEATURES:
 - Enhanced Dashboard with real-time monitoring and adaptive learning
-- Fixed units display: Individual inverters show watts (W), system shows kW  
+- Fixed units display: Individual inverters show watts (W), system shows kW
 - Intelligent Timing System that learns inverter wake/sleep patterns
 - Filtered phantom "New_xxxx" entries from timing intelligence
 - Seasonal adaptation to daylight saving time and weather changes
@@ -183,7 +137,7 @@ RECENT FIXES (v2.2):
 
 CRITICAL CONFIGURATION FILES:
 - inverter_config.json: Essential for mapping inverter IDs to serial numbers
-  Without this file, inverters will show as "INV_xxxxxxx" instead of proper serials
+    Missing file causes fallback labels like "INV_xxxxxxx" instead of serials
 - alert_config.json: Alert thresholds and notification settings
 - email_config.json: Email credentials for notifications (update before use)
 - inverter_timing_intelligence.json: Learned timing patterns for smart alerts

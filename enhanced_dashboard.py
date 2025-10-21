@@ -15,7 +15,9 @@ import traceback
 import smtplib
 import subprocess
 import requests
+from pathlib import Path
 from datetime import datetime, timedelta
+from email.mime.text import MIMEText
 from flask import Flask, render_template, jsonify, request
 from legacy_chilicon_monitor import ChiliconLegacyMonitor
 from final_microinverter_extractor import MicroinverterPowerExtractor
@@ -103,7 +105,9 @@ class EnhancedDashboard:
             'health_status': 'Unknown',
             'alerts': [],
             'individual_inverters': [],
-            'is_online': False
+            'is_online': False,
+            'daily_production_summary': None,
+            'daily_report': None
         }
         
         # Historical data for charts
@@ -128,6 +132,23 @@ class EnhancedDashboard:
         # Initialize intelligent timing system
         self.timing_intelligence = create_timing_intelligence_integration()
         
+        # Daily peak power tracking for accurate timing intelligence
+        self.daily_peaks = {}  # {serial: {'max_power': float, 'peak_time': str, 'date': str}}
+        self._reset_daily_peaks_if_new_day()
+        
+        # Track daily production duration for end-of-day reporting
+        self.daily_production = {}
+        self.last_production_update = None
+        self.production_summary_sent = False
+        self.daily_report_history = []
+
+        # Rolling inverter production history (7-day retention)
+        self.production_history_file = Path('inverter_production_history.json')
+        self.production_history = self._load_production_history()
+        self.current_data['recent_production_history'] = (
+            self.production_history[-7:]
+        )
+
         # Debug tracking
         self.debug_info = {
             'thread_start_time': datetime.now().isoformat(),
@@ -188,6 +209,266 @@ class EnhancedDashboard:
             print(f"❌ Error saving inverter config: {e}")
             return False
     
+    def _reset_daily_peaks_if_new_day(self):
+        """Reset daily peak and production tracking when the date changes"""
+        today = datetime.now().date().isoformat()
+        previous_date = getattr(self, 'daily_metrics_date', None)
+
+        if previous_date == today:
+            return
+
+        if previous_date and self.daily_production:
+            try:
+                self._archive_daily_production(previous_date)
+            except Exception as error:
+                print(
+                    f"⚠️ Archive production failed ({previous_date}): {error}"
+                )
+
+        self.daily_metrics_date = today
+        self.daily_peaks = {}
+        self.daily_production = {}
+        self.last_production_update = None
+        self.production_summary_sent = False
+        print("🔄 Reset daily peaks and production metrics for new day")
+    
+    def _update_daily_peak(self, serial: str, current_power: float):
+        """Update daily peak power tracking for an inverter"""
+        today = datetime.now().date().isoformat()
+        current_time = datetime.now().strftime("%H:%M")
+        
+        if serial not in self.daily_peaks:
+            # First reading of the day for this inverter
+            self.daily_peaks[serial] = {
+                'max_power': current_power,
+                'peak_time': current_time,
+                'date': today
+            }
+        else:
+            # Check if this is a new daily maximum
+            if current_power > self.daily_peaks[serial]['max_power']:
+                self.daily_peaks[serial].update({
+                    'max_power': current_power,
+                    'peak_time': current_time,
+                    'date': today
+                })
+    
+    def _update_daily_production(self, detailed_stats):
+        """Track production minutes using the latest readings"""
+        now = datetime.now()
+        delta_minutes = 0
+        if self.last_production_update:
+            elapsed = (now - self.last_production_update).total_seconds() / 60
+            if elapsed > 0:
+                delta_minutes = max(1, min(30, int(elapsed)))
+        self.last_production_update = now
+
+        for stats in detailed_stats or []:
+            serial = stats.get('serial')
+            if not serial:
+                continue
+            if serial.startswith('INV_') or serial.startswith('New_'):
+                continue
+
+            info = self.daily_production.setdefault(serial, {
+                'active_minutes': 0,
+                'total_minutes': 0,
+                'max_power': 0.0,
+                'ever_active': False,
+                'energy_kwh': 0.0,
+                'samples': 0,
+                'array': stats.get('array', 'unknown'),
+                'position': stats.get('position', 0),
+            })
+
+            current_power = stats.get('current_power', 0.0)
+            info['last_power'] = current_power
+            info['array'] = stats.get('array', info.get('array', 'unknown'))
+            info['position'] = stats.get('position', info.get('position', 0))
+            info['max_power'] = max(info.get('max_power', 0.0), current_power)
+            info['last_seen'] = now.isoformat()
+
+            if current_power > 0.01:
+                info['ever_active'] = True
+
+            if delta_minutes > 0:
+                info['total_minutes'] = (
+                    info.get('total_minutes', 0) + delta_minutes
+                )
+                if current_power > 0.01:
+                    info['active_minutes'] = (
+                        info.get('active_minutes', 0) + delta_minutes
+                    )
+
+                # Convert power (kW) over elapsed minutes into energy (kWh)
+                hours_elapsed = delta_minutes / 60.0
+                energy_accumulated = current_power * hours_elapsed
+                info['energy_kwh'] = round(
+                    info.get('energy_kwh', 0.0) + energy_accumulated, 5
+                )
+                info['samples'] = info.get('samples', 0) + 1
+
+    def _build_daily_production_summary(self):
+        """Summarize production durations for all known inverters"""
+        config = self.get_inverter_config()
+        inverter_cfg = config.get('inverters', {})
+        known_serials = {}
+        for inv_id, inv_info in inverter_cfg.items():
+            serial = inv_info.get('serial')
+            if serial:
+                known_serials[serial] = {
+                    'array': inv_info.get('array', 'unknown'),
+                    'position': inv_info.get('position', 0)
+                }
+
+        entries = []
+        total_active_minutes = 0
+        total_energy_kwh = 0.0
+        zero_producers = []
+
+        def _add_entry(serial, meta, info):
+            array = meta.get('array', info.get('array', 'unknown'))
+            position = meta.get('position', info.get('position', 0))
+            active_minutes = info.get('active_minutes', 0)
+            active_hours = (
+                round(active_minutes / 60, 2) if active_minutes else 0.0
+            )
+            energy_kwh = round(info.get('energy_kwh', 0.0), 3)
+            entry = {
+                'serial': serial,
+                'array': array,
+                'position': position,
+                'active_minutes': active_minutes,
+                'active_hours': active_hours,
+                'max_power': round(info.get('max_power', 0.0), 3),
+                'energy_kwh': energy_kwh,
+                'samples': info.get('samples', 0),
+                'ever_active': info.get('ever_active', False)
+            }
+            entries.append(entry)
+            return active_minutes, energy_kwh
+
+        for serial, meta in known_serials.items():
+            info = self.daily_production.get(serial, {})
+            active_minutes, energy_kwh = _add_entry(serial, meta, info)
+            total_active_minutes += active_minutes
+            total_energy_kwh += energy_kwh
+            if active_minutes == 0:
+                zero_producers.append(serial)
+
+        # Include any extra inverters that reported but are not in config
+        for serial, info in self.daily_production.items():
+            if serial in known_serials:
+                continue
+            meta = {
+                'array': info.get('array', 'unknown'),
+                'position': info.get('position', 0)
+            }
+            active_minutes, energy_kwh = _add_entry(serial, meta, info)
+            total_active_minutes += active_minutes
+            total_energy_kwh += energy_kwh
+            if active_minutes == 0:
+                zero_producers.append(serial)
+
+        entries.sort(
+            key=lambda item: (
+                item.get('array', 'unknown'),
+                item.get('position', 0)
+            )
+        )
+
+        energy_values = [
+            entry['energy_kwh']
+            for entry in entries
+            if entry.get('energy_kwh') is not None
+        ]
+        if energy_values:
+            median_energy = round(statistics.median(energy_values), 3)
+        else:
+            median_energy = 0.0
+
+        inverter_count = len(entries) if entries else len(known_serials)
+        if total_active_minutes:
+            total_hours = round(total_active_minutes / 60, 2)
+        else:
+            total_hours = 0.0
+
+        if inverter_count:
+            average_hours = round(total_hours / inverter_count, 2)
+        else:
+            average_hours = 0.0
+
+        return {
+            'generated_at': datetime.now().isoformat(),
+            'date': self.daily_metrics_date,
+            'total_inverters': inverter_count,
+            'total_inverter_hours': total_hours,
+            'average_inverter_hours': average_hours,
+            'total_inverter_energy_kwh': round(total_energy_kwh, 3),
+            'median_inverter_energy_kwh': median_energy,
+            'zero_production': zero_producers,
+            'entries': entries
+        }
+
+    def _format_daily_production_report(self, summary):
+        """Create human-readable runtime summary text"""
+        lines = []
+        lines.append("⏱️ INVERTER RUNTIME SUMMARY:")
+        lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        lines.append(
+            f"Total inverter-hours: {summary['total_inverter_hours']:.1f} h"
+        )
+        total_energy = summary.get('total_inverter_energy_kwh', 0.0)
+        lines.append(
+            f"Total inverter energy: {total_energy:.2f} kWh"
+        )
+        avg_hours = summary['average_inverter_hours']
+        lines.append(
+            f"Average runtime per inverter: {avg_hours:.1f} h"
+        )
+        median_energy = summary.get('median_inverter_energy_kwh', 0.0)
+        lines.append(
+            f"Median inverter energy: {median_energy:.2f} kWh"
+        )
+
+        zero_list = summary.get('zero_production', [])
+        if zero_list:
+            lines.append(
+                "Zero production inverters: " + ", ".join(sorted(zero_list))
+            )
+        else:
+            lines.append("Zero production inverters: None")
+
+        if summary.get('entries'):
+            lines.append("")
+            lines.append("Runtime by inverter (hours):")
+            for entry in summary['entries']:
+                array_label = entry.get('array', 'unknown') or 'unknown'
+                array_label = array_label.title()
+                active_hours = entry['active_hours']
+                max_power = entry['max_power']
+                energy_kwh = entry.get('energy_kwh', 0.0)
+                lines.append(
+                    f" - {entry['serial']} ({array_label}): "
+                    f"{active_hours:.1f}h / {energy_kwh:.2f}kWh "
+                    f"(max {max_power:.2f}kW)"
+                )
+
+        return "\n".join(lines)
+
+    def _refresh_daily_production_snapshot(self):
+        """Update current data with the latest production summary"""
+        summary = self._build_daily_production_summary()
+        self.current_data['daily_production_summary'] = summary
+        return summary
+
+    def _store_daily_report_record(self, report_record):
+        """Persist the most recent daily report in memory for quick access"""
+        self.current_data['daily_report'] = report_record
+        self.daily_report_history.append(report_record)
+        # Keep the last two weeks of reports
+        self.daily_report_history = self.daily_report_history[-14:]
+
     def get_inverter_config(self):
         """Get full inverter configuration including array assignments"""
         try:
@@ -452,6 +733,8 @@ class EnhancedDashboard:
                 # Mark as sent for today
                 self.last_daily_report_date = datetime.now().date()
                 self.daily_report_sent_today = True
+                if result.get('message'):
+                    print(f"ℹ️ Daily report note: {result['message']}")
                 print("✅ Automatic daily report sent successfully")
             else:
                 print(f"❌ Failed to send automatic daily report: {result.get('error')}")
@@ -459,44 +742,54 @@ class EnhancedDashboard:
         except Exception as e:
             print(f"❌ Error sending automatic daily report: {e}")
 
-    def _generate_and_send_daily_report(self):
-        """Generate and send the daily report with sunset context"""
+    def _generate_and_send_daily_report(self, trigger='automatic'):
+        """Generate, persist, and optionally email the daily report."""
+        report_record = {}
         try:
-            import smtplib
-            from email.mime.text import MIMEText
-            
-            # Load email config
-            config_file = 'email_config.json'
-            if not os.path.exists(config_file):
-                return {'success': False, 'error': 'Email not configured'}
-                
-            with open(config_file, 'r') as f:
-                config = json.load(f)
-            
-            # Get current system data and today's history
+
+            # Ensure we have the latest production snapshot
+            production_summary = self._refresh_daily_production_snapshot()
+            production_report = self._format_daily_production_report(
+                production_summary
+            )
+            if self.daily_metrics_date:
+                self._archive_daily_production(
+                    self.daily_metrics_date,
+                    summary=production_summary
+                )
+            self.production_summary_sent = True
             current_data = self.get_current_data()
             today_history = self.get_power_history(24)
-            
-            # Calculate sunset time for context
-            sunset_time = calculate_sunset_time()
-            
-            # Calculate daily stats
-            if today_history:
-                max_power = max([entry['power'] for entry in today_history])
-                avg_power = sum([entry['power'] for entry in today_history]) / len(today_history)
-                
-                # Calculate production hours (power > 0.1kW)
-                production_hours = sum(1 for entry in today_history if entry['power'] > 0.1) / 4  # 15-min intervals
-            else:
-                max_power = avg_power = production_hours = 0
-            
-            # Determine timing context
             current_time = datetime.now()
+            sunset_time = calculate_sunset_time()
             time_after_sunset = current_time - sunset_time
-            timing_note = f"Sent {time_after_sunset.total_seconds()/3600:.1f} hours after sunset"
-            
-            # Create enhanced daily report
-            report_body = f"""📊 Daily Solar Report - {datetime.now().strftime('%Y-%m-%d')}
+            hours_after_sunset = time_after_sunset.total_seconds() / 3600
+            timing_note = f"Sent {hours_after_sunset:.1f} hours after sunset"
+
+            max_power = max(
+                (entry['power'] for entry in today_history),
+                default=0
+            )
+            avg_power = 0
+            production_hours = 0
+            if today_history:
+                total_power = sum(
+                    entry['power'] for entry in today_history
+                )
+                avg_power = total_power / len(today_history)
+                productive_samples = sum(
+                    1 for entry in today_history if entry['power'] > 0.1
+                )
+                production_hours = productive_samples / 4
+
+            zero_list = production_summary.get('zero_production', [])
+            if zero_list:
+                zero_serials = ", ".join(zero_list)
+                print(f"⚠️ Zero-production inverters today: {zero_serials}")
+            else:
+                print("✅ All inverters produced power today")
+
+            report_body = f"""📊 Daily Solar Report - {current_time.strftime('%Y-%m-%d')}
 
 🌅 SUNSET-BASED TIMING:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -507,7 +800,7 @@ class EnhancedDashboard:
 🌞 TODAY'S PERFORMANCE:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ⚡ Final Power Output: {current_data.get('power_kw', 0):.3f} kW (end of day)
-📈 Peak Power Today: {max_power:.3f} kW  
+📈 Peak Power Today: {max_power:.3f} kW
 📊 Average Power: {avg_power:.3f} kW
 🔋 Total Energy Generated: {current_data.get('energy_today_kwh', 0):.2f} kWh
 ⏱️ Production Hours: {production_hours:.1f} hours
@@ -518,8 +811,13 @@ class EnhancedDashboard:
 🟢 System Status: {'Online' if current_data.get('is_online') else 'Offline'}
 🔌 Active Inverters: {current_data.get('active_inverters', 0)}/{current_data.get('total_inverters', 25)}
 🏥 Health Status: {current_data.get('health_status', 'Unknown')}
-📊 Efficiency: {((current_data.get('active_inverters', 0) / current_data.get('total_inverters', 25)) * 100):.1f}% inverters active
+📊 Efficiency: {(
+    (current_data.get('active_inverters', 0) /
+     max(current_data.get('total_inverters', 25), 1)) * 100
+):.1f}% inverters active
 🕐 Last Data Update: {current_data.get('last_update', 'Unknown')}
+
+{production_report}
 
 💡 END-OF-DAY ANALYSIS:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -529,38 +827,126 @@ class EnhancedDashboard:
 
 🌐 Dashboard: http://solar_monitor:5002
 ⚙️ Configure alerts: http://solar_monitor:5002/admin
-📅 Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+📅 Generated: {current_time.strftime('%Y-%m-%d %H:%M:%S')}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 This automated daily report is sent after sunset when solar generation stops.
 Next report will be sent tomorrow after sunset (~{(sunset_time + timedelta(days=1)).strftime('%H:%M')}).
 """
-            
-            # Send email
-            msg = MIMEText(report_body)
-            msg['Subject'] = f'🌇 End-of-Day Solar Report - {datetime.now().strftime("%m/%d/%Y")}'
-            
-            # Use display name if available
-            display_name = config.get('display_name', 'Solar Monitor')
-            from_email = config['smtp_username']
-            msg['From'] = f"{display_name} <{from_email}>"
-            msg['To'] = config['email']
-            
-            server = smtplib.SMTP(config['smtp_server'], int(config['smtp_port']))
-            server.starttls()
-            server.login(config['smtp_username'], config['smtp_password'])
-            server.send_message(msg)
-            server.quit()
-            
-            return {'success': True}
-            
-        except Exception as e:
-            return {'success': False, 'error': str(e)}
+
+            alert_config = {}
+            alert_config_path = Path('alert_config.json')
+            if alert_config_path.exists():
+                alert_config = json.loads(alert_config_path.read_text())
+
+            email_enabled = alert_config.get('email_alerts_enabled', False)
+
+            report_record = {
+                'date': current_time.date().isoformat(),
+                'generated_at': current_time.isoformat(),
+                'trigger': trigger,
+                'sunset_time': sunset_time.isoformat(),
+                'timing_note': timing_note,
+                'hours_after_sunset': round(hours_after_sunset, 2),
+                'report_body': report_body,
+                'report_path': None,
+                'file_saved': False,
+                'file_error': None,
+                'email_enabled': email_enabled,
+                'email_sent': False,
+                'email_error': None,
+                'stats': {
+                    'max_power_kw': round(max_power, 3),
+                    'avg_power_kw': round(avg_power, 3),
+                    'production_hours': round(production_hours, 2),
+                    'energy_today_kwh': current_data.get('energy_today_kwh', 0),
+                    'lifetime_energy_mwh': current_data.get('lifetime_energy_mwh', 0),
+                    'fleet_energy_kwh': production_summary.get('total_inverter_energy_kwh', 0.0),
+                },
+                'production_summary': production_summary,
+                'zero_production_inverters': zero_list,
+                'dashboard_snapshot': {
+                    'power_kw': current_data.get('power_kw', 0),
+                    'active_inverters': current_data.get('active_inverters', 0),
+                    'total_inverters': current_data.get('total_inverters', 25),
+                    'health_status': current_data.get('health_status', 'Unknown'),
+                    'is_online': current_data.get('is_online'),
+                    'last_update': current_data.get('last_update'),
+                }
+            }
+
+            try:
+                reports_dir = Path('daily_reports')
+                reports_dir.mkdir(exist_ok=True)
+                report_filename = reports_dir / f"daily_report_{current_time.strftime('%Y%m%d')}.txt"
+                report_filename.write_text(report_body, encoding='utf-8')
+                report_record['report_path'] = str(report_filename)
+                report_record['file_saved'] = True
+                print(f"💾 Daily report saved to {report_filename}")
+            except Exception as file_error:
+                report_record['file_error'] = str(file_error)
+                print(f"❌ Failed to save daily report to disk: {file_error}")
+
+            if email_enabled:
+                email_config_path = Path('email_config.json')
+                if not email_config_path.exists():
+                    report_record['email_error'] = 'Email not configured'
+                else:
+                    config = json.loads(email_config_path.read_text())
+                    try:
+                        msg = MIMEText(report_body)
+                        msg['Subject'] = (
+                            f"🌇 End-of-Day Solar Report - {current_time.strftime('%m/%d/%Y')}"
+                        )
+                        display_name = config.get('display_name', 'Solar Monitor')
+                        from_email = config['smtp_username']
+                        msg['From'] = f"{display_name} <{from_email}>"
+                        msg['To'] = config['email']
+
+                        server = smtplib.SMTP(
+                            config['smtp_server'], int(config['smtp_port'])
+                        )
+                        server.starttls()
+                        server.login(
+                            config['smtp_username'], config['smtp_password']
+                        )
+                        server.send_message(msg)
+                        server.quit()
+                        report_record['email_sent'] = True
+                        print("✅ Daily report email sent successfully")
+                    except Exception as email_error:
+                        report_record['email_error'] = str(email_error)
+                        print(f"❌ Failed to send daily report email: {email_error}")
+            else:
+                print("ℹ️ Email alerts disabled; daily report stored locally only")
+
+            self._store_daily_report_record(report_record)
+            report_record['history_snapshot'] = (
+                self.get_recent_production_history()
+            )
+
+            success = report_record['file_saved'] and (
+                report_record['email_sent'] or not email_enabled
+            )
+            response = {'success': success, 'report': report_record}
+            if not email_enabled:
+                response['message'] = 'Email alerts disabled; report saved locally'
+            elif not report_record['email_sent']:
+                response['message'] = report_record.get('email_error')
+
+            return response
+
+        except Exception as error:
+            if report_record:
+                report_record['email_error'] = str(error)
+                self._store_daily_report_record(report_record)
+            return {'success': False, 'error': str(error), 'report': report_record}
 
     def _fetch_from_website(self):
         """Fetch fresh data from the website"""
         try:
             print("🌐 Contacting Chilicon website...")
+            self._reset_daily_peaks_if_new_day()
             
             # Record that we're accessing the website now
             self.last_website_access = datetime.now()
@@ -642,19 +1028,31 @@ Next report will be sent tomorrow after sunset (~{(sunset_time + timedelta(days=
                     # Convert detailed stats to individual_inverters format for compatibility
                     converted_inverters = []
                     for i, stats in enumerate(detailed_stats):
+                        serial = stats['serial']
+                        current_power = stats['current_power']
+                        
+                        # Update daily peak tracking for this inverter
+                        self._update_daily_peak(serial, current_power)
+                        
+                        # Get real peak time from daily tracking
+                        peak_info = self.daily_peaks.get(serial, {})
+                        real_peak_time = peak_info.get('peak_time', datetime.now().strftime("%H:%M"))
+                        
                         converted_inverters.append({
                             'position': i,
-                            'serial': stats['serial'],
-                            'power_w': stats['current_power'],  # Keep in kW for display
-                            'power': stats['current_power'],    # Keep in kW
-                            'status': 'active' if stats['current_power'] > 0.01 else 'inactive',
+                            'serial': serial,
+                            'power_w': current_power,  # Keep in kW for display
+                            'power': current_power,    # Keep in kW
+                            'status': 'active' if current_power > 0.01 else 'inactive',
                             'timestamp': datetime.now().isoformat(),
-                            'max_power_today': stats.get('max_power', stats['current_power']),
-                            'avg_power': stats.get('avg_positive_power', stats['current_power']),
-                            'peak_time': stats.get('last_reading_time', datetime.now().strftime("%H:%M"))
+                            'max_power_today': stats.get('max_power', current_power),
+                            'avg_power': stats.get('avg_positive_power', current_power),
+                            'peak_time': real_peak_time  # Now uses real peak time!
                         })
                     
                     self.current_data['individual_inverters'] = converted_inverters
+                    self._update_daily_production(detailed_stats)
+                    self._refresh_daily_production_snapshot()
                     
                     # Update active inverters count from new data
                     active_count = len([s for s in detailed_stats if s['current_power'] > 0.01])
@@ -665,9 +1063,9 @@ Next report will be sent tomorrow after sunset (~{(sunset_time + timedelta(days=
                     # Analyze timing patterns and learn from inverter behavior
                     print("🧠 Analyzing inverter timing patterns...")
                     try:
-                        # Filter out phantom "New_xxxx" entries before timing analysis
+                        # Filter out phantom "New_xxxx" and "INV_xxxx" entries before timing analysis
                         real_stats = [stats for stats in detailed_stats 
-                                    if not stats['serial'].startswith('New_')]
+                                    if not (stats['serial'].startswith('New_') or stats['serial'].startswith('INV_'))]
                         print(f"📊 Filtered timing data: {len(real_stats)}/{len(detailed_stats)} real inverters")
                         
                         timing_analysis = self.timing_intelligence['analyze_and_learn'](real_stats)
@@ -698,7 +1096,10 @@ Next report will be sent tomorrow after sunset (~{(sunset_time + timedelta(days=
                     # Check for alerts after getting detailed stats
                     print("🚨 Checking for inverter alerts...")
                     try:
-                        self.alert_manager.check_and_send_alerts(detailed_stats)
+                        self.alert_manager.check_and_send_alerts(
+                            detailed_stats,
+                            self.current_data.get('daily_production_summary')
+                        )
                         print("✅ Alert check completed")
                     except Exception as e:
                         print(f"❌ Alert check failed: {e}")
@@ -818,15 +1219,15 @@ Next report will be sent tomorrow after sunset (~{(sunset_time + timedelta(days=
                         break
                 
                 if not serial:
-                    # Create a temporary serial if not found in config
-                    serial = f"INV_{inverter_id}"
-                    print(f"⚠️ Unknown inverter ID {inverter_id}, using temporary serial {serial}")
+                    # Skip unknown inverters instead of creating phantom entries
+                    print(f"⚠️ Skipping unknown inverter ID {inverter_id} (not configured)")
+                    continue
                 
                 # AJAX endpoint returns power values in watts directly (250W panels)
                 power_watts = float(power_data['power_kw'])  # Already in watts, not kW
                 
-                # Determine status based on power level
-                if power_watts > 10:  # 10W threshold
+                # Determine status based on 0.01 kW (~10W) threshold
+                if power_watts > 0.01:
                     status = 'active'
                 elif power_watts > 0:
                     status = 'low_power'
@@ -835,6 +1236,11 @@ Next report will be sent tomorrow after sunset (~{(sunset_time + timedelta(days=
                 
                 # Convert timestamp to readable time
                 reading_time = datetime.fromtimestamp(power_data['timestamp']).strftime("%H:%M")
+                
+                # Update daily peak tracking for accurate timing intelligence
+                self._update_daily_peak(serial, power_watts)
+                peak_info = self.daily_peaks.get(serial, {})
+                real_peak_time = peak_info.get('peak_time', reading_time)
                 
                 stats = {
                     'inverter_id': inverter_id,
@@ -847,6 +1253,7 @@ Next report will be sent tomorrow after sunset (~{(sunset_time + timedelta(days=
                     'avg_positive_power': power_watts if power_watts > 0 else 0,
                     'current_power': power_watts,
                     'last_reading_time': reading_time,
+                    'peak_time': real_peak_time,  # Real peak time for timing intelligence
                     'status': status,
                     'array': array,
                     'position': position
@@ -925,6 +1332,70 @@ Next report will be sent tomorrow after sunset (~{(sunset_time + timedelta(days=
                 json.dump(data, f, indent=2)
         except Exception as e:
             print(f"⚠️ Could not save power history cache: {e}")
+
+    def _load_production_history(self):
+        """Load stored inverter production history from disk"""
+        try:
+            if self.production_history_file.exists():
+                with open(self.production_history_file, 'r') as handle:
+                    data = json.load(handle)
+                records = data.get('records', [])
+                records.sort(key=lambda item: item.get('date', ''))
+                return records[-7:]
+        except Exception as error:
+            print(f"⚠️ Could not load production history: {error}")
+        return []
+
+    def _save_production_history(self):
+        """Persist rolling inverter production history to disk"""
+        try:
+            payload = {
+                'records': self.production_history[-7:],
+                'updated_at': datetime.now().isoformat()
+            }
+            with open(self.production_history_file, 'w') as handle:
+                json.dump(payload, handle, indent=2)
+        except Exception as error:
+            print(f"⚠️ Could not save production history: {error}")
+
+    def _archive_daily_production(self, date_str, summary=None):
+        """Archive daily production metrics with 7-day retention."""
+        if not date_str:
+            return
+
+        if summary is None:
+            summary = self._build_daily_production_summary()
+
+        archive_entry = {
+            'date': date_str,
+            'captured_at': datetime.now().isoformat(),
+            'total_inverter_hours': summary.get('total_inverter_hours', 0.0),
+            'average_inverter_hours': summary.get(
+                'average_inverter_hours', 0.0
+            ),
+            'total_inverter_energy_kwh': summary.get(
+                'total_inverter_energy_kwh', 0.0
+            ),
+            'entries': summary.get('entries', [])
+        }
+
+        # Replace existing entry for the same date (if any)
+        filtered_history = [
+            record for record in self.production_history
+            if record.get('date') != date_str
+        ]
+        filtered_history.append(archive_entry)
+        filtered_history.sort(key=lambda item: item.get('date', ''))
+        self.production_history = filtered_history[-7:]
+        self._save_production_history()
+        self.current_data['recent_production_history'] = (
+            self.production_history[-7:]
+        )
+
+    def get_recent_production_history(self, days=7):
+        """Return recent inverter production records."""
+        recent = self.production_history[-days:]
+        return json.loads(json.dumps(recent))  # Deep-copy via serialization
 
 
 # Global dashboard instance
@@ -1249,11 +1720,13 @@ def save_imessage_config():
 def send_daily_report():
     """Send daily report manually"""
     try:
-        # This would trigger the daily report
+        result = dashboard._generate_and_send_daily_report(trigger='manual')
+        status = 200 if result.get('success') else 500
         return jsonify({
-            'success': True,
-            'message': 'Daily report sent successfully'
-        })
+            'success': result.get('success', False),
+            'message': result.get('message', 'Daily report processed'),
+            'report': result.get('report')
+        }), status
         
     except Exception as e:
         return jsonify({
@@ -1279,6 +1752,61 @@ def reset_daily_report():
             'success': False,
             'error': f'Failed to reset daily report: {str(e)}'
         })
+
+
+@app.route('/api/admin/latest-daily-report')
+def get_latest_daily_report():
+    """Return the most recent daily report payload"""
+    try:
+        latest_report = dashboard.current_data.get('daily_report')
+        if not latest_report:
+            return jsonify({
+                'success': False,
+                'error': 'No daily report generated yet'
+            }), 404
+
+        return jsonify({
+            'success': True,
+            'report': latest_report
+        })
+
+    except Exception as error:
+        return jsonify({
+            'success': False,
+            'error': f'Failed to load latest report: {error}'
+        }), 500
+
+
+@app.route('/api/admin/daily-report-history')
+def get_daily_report_history():
+    """Return recent daily report metadata"""
+    try:
+        return jsonify({
+            'success': True,
+            'reports': dashboard.daily_report_history
+        })
+
+    except Exception as error:
+        return jsonify({
+            'success': False,
+            'error': f'Failed to load report history: {error}'
+        }), 500
+
+
+@app.route('/api/admin/inverter-production-history')
+def get_inverter_production_history():
+    """Return the rolling inverter production history used for analytics"""
+    try:
+        return jsonify({
+            'success': True,
+            'history': dashboard.get_recent_production_history()
+        })
+
+    except Exception as error:
+        return jsonify({
+            'success': False,
+            'error': f'Failed to load production history: {error}'
+        }), 500
 
 
 @app.route('/api/admin/sunset-info')
@@ -2288,7 +2816,7 @@ def debug_raw_website_data():
                                 'power_kw': power_kw,
                                 'inverter_id': inverter_id,
                                 'configured': inverter_id in config_map,
-                                'serial': config_map.get(inverter_id, f"New_{abs(inverter_id) % 100000}")
+                                'serial': config_map.get(inverter_id, f"UNCONFIGURED_{inverter_id}")
                             })
                 
                 # Analysis

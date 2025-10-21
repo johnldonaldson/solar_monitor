@@ -9,7 +9,10 @@ import json
 import os
 import smtplib
 import subprocess
-from datetime import datetime
+from datetime import datetime, timedelta
+import math
+import statistics
+from pathlib import Path
 from email.mime.text import MIMEText
 
 
@@ -58,6 +61,7 @@ def calculate_sunset_time(latitude=37.7749, longitude=-122.4194):
 class InverterAlertManager:
     def __init__(self):
         self.alert_state_file = 'alert_state.json'
+        self.production_history_file = Path('inverter_production_history.json')
         # Initialize timing intelligence for smart alerting
         try:
             from intelligent_inverter_timing import create_timing_intelligence_integration
@@ -66,107 +70,304 @@ class InverterAlertManager:
         except Exception as e:
             print(f"⚠️ Could not load timing intelligence: {e}")
             self.timing_intelligence = None
+
+    def _parse_time_for_today(self, time_str, current_time):
+        """Convert HH:MM string into today's datetime"""
+        if not time_str:
+            return None
+        try:
+            hour, minute = map(int, time_str.split(':')[:2])
+            return current_time.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        except (ValueError, AttributeError):
+            return None
+
+    def _compute_dynamic_expectation(self, total_inverters, wake_time, sleep_time, current_time):
+        """Use learned wake/sleep times with grace periods to set expectations"""
+        ramp_up = timedelta(minutes=45)
+        ramp_down = timedelta(minutes=45)
+        pre_wake_buffer = timedelta(minutes=15)
+
+        wake_dt = self._parse_time_for_today(wake_time, current_time)
+        sleep_dt = self._parse_time_for_today(sleep_time, current_time)
+
+        if not wake_dt:
+            return total_inverters, 'fallback', 'No learned wake time'
+
+        if current_time < wake_dt - pre_wake_buffer:
+            return 0, 'night', f'Before wake window ({wake_time})'
+
+        if current_time < wake_dt:
+            return 0, 'pre_wake', f'Approaching wake window ({wake_time})'
+
+        if current_time <= wake_dt + ramp_up:
+            progress = (current_time - wake_dt).total_seconds() / ramp_up.total_seconds()
+            progress = max(0.0, min(1.0, progress))
+            expected = max(0, min(total_inverters, math.ceil(total_inverters * progress)))
+            detail = f'Ramping up after {wake_time}'
+            return expected, 'ramp_up', detail
+
+        if sleep_dt and current_time >= sleep_dt:
+            if current_time <= sleep_dt + ramp_down:
+                progress = (current_time - sleep_dt).total_seconds() / ramp_down.total_seconds()
+                progress = max(0.0, min(1.0, progress))
+                remaining = max(0, min(total_inverters, math.floor(total_inverters * (1 - progress))))
+                detail = f'Ramping down after {sleep_time}'
+                return remaining, 'ramp_down', detail
+            return 0, 'night', f'After sleep window ({sleep_time})'
+
+        return total_inverters, 'daytime', f'Productive window ({wake_time} - {sleep_time or "unset"})'
+
+    def _fallback_expectation_for_array(self, array_name, current_time):
+        """Provide conservative expectations when no learned patterns exist"""
+        hour = current_time.hour
+        if array_name == 'east':
+            if hour < 6 or hour >= 18:
+                return 0, 'night', 'Fallback night window'
+            if 6 <= hour < 7:
+                return 0, 'pre_wake', 'East fallback pre-dawn'
+            if 7 <= hour < 8:
+                return 6, 'ramp_up', 'East fallback ramping up'
+            if 8 <= hour < 15:
+                return 12, 'daytime', 'East fallback daytime expectation'
+            if 15 <= hour < 17:
+                return 6, 'ramp_down', 'East fallback winding down'
+            return 0, 'night', 'East fallback evening shutdown'
+
+        if array_name == 'south':
+            if hour < 8 or hour >= 20:
+                return 0, 'night', 'Fallback night window'
+            if 8 <= hour < 9:
+                return 5, 'ramp_up', 'South fallback ramping up'
+            if 9 <= hour < 17:
+                return 13, 'daytime', 'South fallback daytime expectation'
+            if 17 <= hour < 19:
+                return 8, 'ramp_down', 'South fallback winding down'
+            return 0, 'night', 'South fallback evening shutdown'
+
+        return 0, 'unknown', 'No fallback data'
+
+    def _load_recent_production_history(self, days):
+        """Fetch recent inverter production records for history-based alerts."""
+        try:
+            if not self.production_history_file.exists():
+                return []
+
+            with self.production_history_file.open('r', encoding='utf-8') as handle:
+                data = json.load(handle)
+
+            records = data.get('records', [])
+            records.sort(key=lambda item: item.get('date', ''))
+            return records[-days:]
+
+        except Exception as error:
+            print(f"⚠️ Could not load production history: {error}")
+            return []
+
+    def generate_underperformer_alerts(self, production_summary, alert_config):
+        """Identify consistently weak inverters using recent daily production history."""
+        window_days = alert_config.get('underperformer_history_days', 7)
+        ratio_threshold = alert_config.get('underperformer_ratio_threshold', 0.5)
+        critical_ratio = alert_config.get('underperformer_critical_ratio', 0.25)
+        min_days = alert_config.get('underperformer_min_days', 3)
+        zero_threshold = alert_config.get('underperformer_zero_kwh', 0.05)
+        zero_day_threshold = alert_config.get('underperformer_zero_day_threshold', 2)
+        min_median_kwh = alert_config.get('underperformer_min_median_kwh', 0.3)
+
+        history_records = self._load_recent_production_history(window_days)
+
+        # Merge the current day's summary (if provided) into the evaluation window
+        if production_summary and production_summary.get('entries'):
+            summary_date = production_summary.get('date')
+            if not summary_date:
+                summary_date = datetime.now().date().isoformat()
+
+            snapshot = {
+                'date': summary_date,
+                'entries': production_summary.get('entries', []),
+                'total_inverter_hours': production_summary.get('total_inverter_hours', 0.0),
+                'average_inverter_hours': production_summary.get('average_inverter_hours', 0.0),
+                'total_inverter_energy_kwh': production_summary.get('total_inverter_energy_kwh', 0.0)
+            }
+
+            history_records = [
+                record for record in history_records
+                if record.get('date') != summary_date
+            ]
+            history_records.append(snapshot)
+            history_records.sort(key=lambda item: item.get('date', ''))
+            history_records = history_records[-window_days:]
+
+        inverter_samples = {}
+        valid_days = []
+
+        for record in history_records:
+            entries = record.get('entries', [])
+            energies = [
+                entry.get('energy_kwh', 0.0) for entry in entries
+                if entry.get('energy_kwh') is not None
+            ]
+            if not energies:
+                continue
+
+            median_energy = statistics.median(energies)
+            if median_energy < min_median_kwh:
+                continue
+
+            record_date = record.get('date')
+            valid_days.append(record_date)
+
+            for entry in entries:
+                serial = entry.get('serial')
+                if not serial:
+                    continue
+
+                energy_kwh = entry.get('energy_kwh', 0.0)
+                ratio = (energy_kwh / median_energy) if median_energy else 0.0
+                inverter_samples.setdefault(serial, []).append({
+                    'date': record_date,
+                    'energy_kwh': round(energy_kwh, 3),
+                    'median_energy_kwh': round(median_energy, 3),
+                    'ratio': round(ratio, 3)
+                })
+
+        if not valid_days:
+            return []
+
+        underperformer_alerts = []
+
+        for serial, samples in inverter_samples.items():
+            if len(samples) < min_days:
+                continue
+
+            zero_days = [s for s in samples if s['energy_kwh'] <= zero_threshold]
+            low_days = [s for s in samples if s['ratio'] < ratio_threshold and s['energy_kwh'] > zero_threshold]
+
+            if len(zero_days) < zero_day_threshold and len(low_days) < min_days:
+                continue
+
+            avg_ratio = round(
+                sum(s['ratio'] for s in samples) / len(samples),
+                3
+            )
+            avg_energy = round(
+                sum(s['energy_kwh'] for s in samples) / len(samples),
+                3
+            )
+
+            severity = 'CRITICAL' if (
+                avg_ratio <= critical_ratio or len(zero_days) >= zero_day_threshold
+            ) else 'WARNING'
+
+            summary_line = (
+                f"{severity}: Inverter {serial} averaging {avg_ratio * 100:.0f}% "
+                f"of fleet median ({avg_energy:.2f} kWh/day) across {len(samples)} days"
+            )
+
+            underperformer_alerts.append({
+                'type': f'underperformer_{serial}',
+                'severity': severity,
+                'message': summary_line,
+                'timestamp': datetime.now().isoformat(),
+                'history_window_days': len(valid_days),
+                'low_days': len(low_days),
+                'zero_days': len(zero_days),
+                'samples_analyzed': samples,
+                'analysis_days': valid_days,
+                'ratio_threshold': ratio_threshold,
+                'zero_threshold': zero_threshold
+            })
+
+        if underperformer_alerts:
+            alert_count = len(underperformer_alerts)
+            print(f"📉 Identified {alert_count} persistent underperformers")
+
+        return underperformer_alerts
     
     def get_expected_active_inverters(self, current_time):
-        """
-        Get the expected number of active inverters based on timing intelligence
-        Returns tuple: (expected_east, expected_south, reasoning)
-        """
+        """Return expected counts and context for east/south arrays"""
+        default_context = {
+            'east_stage': 'fallback',
+            'south_stage': 'fallback',
+            'east_detail': 'No timing intelligence available',
+            'south_detail': 'No timing intelligence available'
+        }
+
         if not self.timing_intelligence:
-            # Fallback to simple time-based expectations
             hour = current_time.hour
             if 6 <= hour <= 8:
-                return (12, 0, "Early morning - only east array expected")
-            elif 9 <= hour <= 16:
-                return (12, 13, "Midday - both arrays expected active")
-            elif 17 <= hour <= 19:
-                return (0, 13, "Late day - only south array expected")
-            else:
-                return (0, 0, "Night/dawn - no arrays expected active")
-        
+                return (12, 0, "Early morning (fallback)", default_context)
+            if 9 <= hour <= 16:
+                return (12, 13, "Midday (fallback)", default_context)
+            if 17 <= hour <= 19:
+                return (0, 13, "Late day (fallback)", default_context)
+            return (0, 0, "Night/dawn (fallback)", default_context)
+
         try:
-            # Get current timing insights
             insights = self.timing_intelligence['get_insights']()
-            current_hour = current_time.hour
-            
-            # Default expectations
-            expected_east = 0
-            expected_south = 0
-            reasoning = ""
-            
-            # Check learned patterns for each array
             array_groups = insights.get('array_groups', {})
-            
-            # East array analysis
+
+            context = {
+                'east_stage': 'unknown',
+                'south_stage': 'unknown',
+                'east_detail': '',
+                'south_detail': ''
+            }
+
             east_data = array_groups.get('east_facing', {})
-            has_east_patterns = east_data.get('typical_wake_time') and east_data.get('count', 0) > 0
-            
+            has_east_patterns = (
+                east_data.get('typical_wake_time') and east_data.get('count', 0) > 0
+            )
             if has_east_patterns:
-                try:
-                    wake_hour = int(east_data['typical_wake_time'].split(':')[0])
-                    sleep_hour = int(east_data.get('typical_sleep_time', '18:00').split(':')[0])
-                    if wake_hour <= current_hour <= sleep_hour:
-                        expected_east = 12
-                except (ValueError, IndexError):
-                    pass
-            
-            # South array analysis  
-            south_data = array_groups.get('south_facing', {})
-            has_south_patterns = south_data.get('typical_wake_time') and south_data.get('count', 0) > 0
-            
-            if has_south_patterns:
-                try:
-                    wake_hour = int(south_data['typical_wake_time'].split(':')[0])
-                    sleep_hour = int(south_data.get('typical_sleep_time', '19:00').split(':')[0])
-                    if wake_hour <= current_hour <= sleep_hour:
-                        expected_south = 13
-                except (ValueError, IndexError):
-                    pass
-            
-            # If no learned patterns available, use intelligent fallback based on time
-            if not has_east_patterns and not has_south_patterns:
-                # Intelligent fallback based on typical solar patterns
-                if 6 <= current_hour <= 8:
-                    expected_east = 12  # East wakes first
-                    expected_south = 0
-                    reasoning = "Early morning - east array expected (no learned patterns)"
-                elif 9 <= current_hour <= 16:
-                    expected_east = 12  # Both active during midday
-                    expected_south = 13
-                    reasoning = "Midday - both arrays expected (no learned patterns)"
-                elif 17 <= current_hour <= 19:
-                    expected_east = 0  # East may shut down first
-                    expected_south = 13
-                    reasoning = "Late day - south array expected (no learned patterns)"
-                else:
-                    expected_east = 0
-                    expected_south = 0
-                    reasoning = "Night/dawn - no arrays expected (no learned patterns)"
+                expected_east, east_stage, east_detail = self._compute_dynamic_expectation(
+                    12,
+                    east_data.get('typical_wake_time'),
+                    east_data.get('typical_sleep_time'),
+                    current_time
+                )
             else:
-                # Generate reasoning based on learned patterns
-                if expected_east > 0 and expected_south > 0:
-                    reasoning = "Both arrays should be active (learned patterns)"
-                elif expected_east > 0:
-                    reasoning = "Only east array should be active (learned patterns)"
-                elif expected_south > 0:
-                    reasoning = "Only south array should be active (learned patterns)"
-                else:
-                    reasoning = "No arrays expected active (learned patterns)"
-            
-            return (expected_east, expected_south, reasoning)
-            
-        except Exception as e:
-            print(f"⚠️ Error getting timing expectations: {e}")
-            # Fallback to simple logic
+                expected_east, east_stage, east_detail = self._fallback_expectation_for_array(
+                    'east', current_time
+                )
+            context['east_stage'] = east_stage
+            context['east_detail'] = east_detail
+
+            south_data = array_groups.get('south_facing', {})
+            has_south_patterns = (
+                south_data.get('typical_wake_time') and south_data.get('count', 0) > 0
+            )
+            if has_south_patterns:
+                expected_south, south_stage, south_detail = self._compute_dynamic_expectation(
+                    13,
+                    south_data.get('typical_wake_time'),
+                    south_data.get('typical_sleep_time'),
+                    current_time
+                )
+            else:
+                expected_south, south_stage, south_detail = self._fallback_expectation_for_array(
+                    'south', current_time
+                )
+            context['south_stage'] = south_stage
+            context['south_detail'] = south_detail
+
+            details = []
+            if east_detail:
+                details.append(f"East: {east_detail}")
+            if south_detail:
+                details.append(f"South: {south_detail}")
+            reasoning = " | ".join(details) if details else "No learned patterns"
+
+            return (expected_east, expected_south, reasoning, context)
+
+        except Exception as exc:
+            print(f"⚠️ Error getting timing expectations: {exc}")
             hour = current_time.hour
             if 6 <= hour <= 8:
-                return (12, 0, "Early morning fallback")
-            elif 9 <= hour <= 16:
-                return (12, 13, "Midday fallback")
-            elif 17 <= hour <= 19:
-                return (0, 13, "Late day fallback")
-            else:
-                return (0, 0, "Night fallback")
+                return (12, 0, "Early morning fallback", default_context)
+            if 9 <= hour <= 16:
+                return (12, 13, "Midday fallback", default_context)
+            if 17 <= hour <= 19:
+                return (0, 13, "Late day fallback", default_context)
+            return (0, 0, "Night fallback", default_context)
     
     def classify_inverter_by_serial(self, serial):
         """Classify an inverter as east or south facing based on known arrays"""
@@ -219,10 +420,15 @@ class InverterAlertManager:
                 return []
             
             # Get intelligent expectations based on timing patterns
-            expected_east, expected_south, reasoning = self.get_expected_active_inverters(current_time)
+            expected_east, expected_south, reasoning, expectation_context = (
+                self.get_expected_active_inverters(current_time)
+            )
+            east_stage = expectation_context.get('east_stage', 'unknown')
+            south_stage = expectation_context.get('south_stage', 'unknown')
             expected_total = expected_east + expected_south
             
             print(f"🧠 Intelligent expectations: East={expected_east}, South={expected_south} ({reasoning})")
+            print(f"   🛈 Stages -> East: {east_stage}, South: {south_stage}")
             
             # Classify current inverters by array
             east_active = 0
@@ -277,8 +483,12 @@ class InverterAlertManager:
                     'reasoning': 'Physical inverters not responding'
                 })
             
+            ramp_stages = {'pre_wake', 'ramp_up', 'ramp_down', 'night'}
+            east_ready = expected_east > 0 and east_stage not in ramp_stages
+            south_ready = expected_south > 0 and south_stage not in ramp_stages
+
             # 2. Check east array against expectations (only if we expect it to be active)
-            if expected_east > 0:
+            if east_ready:
                 east_missing = max(0, expected_east - east_active)
                 if east_missing >= 3:  # Threshold for east array alerts
                     severity = "CRITICAL" if east_missing >= 6 else "WARNING"
@@ -301,7 +511,7 @@ class InverterAlertManager:
                     })
             
             # 3. Check south array against expectations (only if we expect it to be active)
-            if expected_south > 0:
+            if south_ready:
                 south_missing = max(0, expected_south - south_active)
                 if south_missing >= 3:  # Threshold for south array alerts
                     severity = "CRITICAL" if south_missing >= 7 else "WARNING"
@@ -324,7 +534,11 @@ class InverterAlertManager:
                     })
             
             # 4. Check for overall system underperformance (backup check)
-            if expected_total > 0:
+            stage_ready = (
+                (expected_east > 0 and east_stage not in ramp_stages)
+                or (expected_south > 0 and south_stage not in ramp_stages)
+            )
+            if expected_total > 0 and stage_ready and expected_total >= 3:
                 performance_ratio = total_active / expected_total
                 if performance_ratio < 0.8:  # Less than 80% of expected
                     severity = "CRITICAL" if performance_ratio < 0.6 else "WARNING"
@@ -345,8 +559,11 @@ class InverterAlertManager:
             
             # Add timing context to all alerts
             if alerts:
-                timing_context = (f"Alert generated at {current_time.strftime('%H:%M')} "
-                                f"({minutes_until_sunset:.0f} min until sunset). {reasoning}")
+                timing_context = (
+                    f"Alert generated at {current_time.strftime('%H:%M')} "
+                    f"({minutes_until_sunset:.0f} min until sunset). "
+                    f"East stage: {east_stage}, South stage: {south_stage}. {reasoning}"
+                )
                 
                 for alert_item in alerts:
                     alert_item['timing_context'] = timing_context
@@ -355,6 +572,10 @@ class InverterAlertManager:
                     alert_item['expected_south'] = expected_south
                     alert_item['actual_east'] = east_active
                     alert_item['actual_south'] = south_active
+                    alert_item['east_stage'] = east_stage
+                    alert_item['south_stage'] = south_stage
+                    alert_item['east_detail'] = expectation_context.get('east_detail')
+                    alert_item['south_detail'] = expectation_context.get('south_detail')
             
             if not alerts:
                 print("✅ No alerts needed - system performing within intelligent expectations")
@@ -527,7 +748,7 @@ Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
         except Exception as e:
             print(f"⚠️ Could not save alert state: {e}")
     
-    def check_and_send_alerts(self, detailed_stats):
+    def check_and_send_alerts(self, detailed_stats, production_summary=None):
         """Main method to check for issues and send alerts if needed"""
         try:
             # Load configurations
@@ -545,10 +766,16 @@ Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
             # Load alert state
             alert_state = self.load_alert_state()
             
-            # Generate alerts
-            alerts = self.generate_offline_inverter_alerts(detailed_stats, alert_config)
+            # Generate alerts from instantaneous status and multi-day history
+            pending_alerts = []
+            pending_alerts.extend(
+                self.generate_offline_inverter_alerts(detailed_stats, alert_config)
+            )
+            pending_alerts.extend(
+                self.generate_underperformer_alerts(production_summary, alert_config)
+            )
             
-            if not alerts:
+            if not pending_alerts:
                 return  # No alerts needed
             
             # Determine delivery methods
@@ -563,7 +790,7 @@ Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
                 return
             
             # Send alerts that haven't been sent recently
-            for alert in alerts:
+            for alert in pending_alerts:
                 if self.should_send_alert(alert, alert_state['last_alerts_sent']):
                     print(f"🚨 Sending {alert['severity']} alert: {alert['message']}")
                     

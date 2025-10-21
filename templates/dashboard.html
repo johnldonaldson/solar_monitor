@@ -626,7 +626,7 @@
                     
                     // Power is in watts for individual inverters (250W panels)
                     const powerW = stats.current_power || 0;
-                    const isActive = stats.current_power > 10; // Active if > 10W
+                    const isActive = stats.current_power > 0.01; // Active if > 0.01W (matches backend)
                     
                     div.classList.add(isActive ? 'active' : 'inactive');
                     
@@ -667,7 +667,7 @@
                     
                     // Power is in watts for individual inverters
                     const powerW = inverter.power_w || 0;
-                    const isActive = powerW > 10; // Consider active if > 10W
+                    const isActive = powerW > 0.01; // Consider active if > 0.01W (matches backend)
                     
                     div.classList.add(isActive ? 'active' : 'inactive');
                     
