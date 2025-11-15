@@ -62,6 +62,10 @@ class SimpleWeatherMonitor:
                     'precip_rate': latest.get('precip_rate'),
                     'precip_total': latest.get('precip_total'),
                     'observation_time': latest.get('observation_time'),
+                    'solar_radiation': latest.get(
+                        'solar_radiation',
+                        latest.get('solarRadiation')
+                    ),
                     'source': 'observations_json',
                 }
             else:
@@ -73,6 +77,7 @@ class SimpleWeatherMonitor:
                     'precip_rate': self._extract_precip_rate(html),
                     'precip_total': self._extract_precip_total(html),
                     'observation_time': None,
+                    'solar_radiation': self._extract_solar_radiation(html),
                     'source': 'regex_fallback',
                 }
             
@@ -130,6 +135,16 @@ class SimpleWeatherMonitor:
             r'PRECIP\s+(?:TOTAL|ACCUM)\s+([0-9.]+)\s*in'
         ]
         return self._extract_float_max(html, patterns)
+
+    def _extract_solar_radiation(self, html):
+        """Extract solar radiation (W/m^2)"""
+        patterns = [
+            r'"solarRadiation":([0-9.]+)',
+            r'"solarRadiationHigh":([0-9.]+)',
+            r'SOLAR\s+RADIATION\s+([0-9.]+)\s*w/m²',
+            r'SOLAR\s+RADIATION\s+([0-9.]+)\s*w/m2'
+        ]
+        return self._extract_float_max(html, patterns)
     
     def _extract_float(self, html, patterns):
         """Extract first float value using multiple patterns"""
@@ -173,6 +188,7 @@ class SimpleWeatherMonitor:
         humidity = data.get('humidity', 0)
         precip_rate = data.get('precip_rate', 0)
         precip_total = data.get('precip_total', 0)
+        solar_radiation = data.get('solar_radiation')
         
         # Determine if it's raining
         is_raining = False
@@ -204,7 +220,8 @@ class SimpleWeatherMonitor:
             'should_suspend_alerts': is_raining,
             'summary': summary,
             'weather_data': data,
-            'reasons': reasons
+            'reasons': reasons,
+            'solar_radiation': solar_radiation
         }
     
     def _load_cache(self):
@@ -259,6 +276,10 @@ class SimpleWeatherMonitor:
             'precip_rate': imperial.get('precipRate', 0.0),
             'precip_total': imperial.get('precipTotal', 0.0),
             'observation_time': latest.get('obsTimeLocal'),
+            'solar_radiation': latest.get(
+                'solarRadiation',
+                latest.get('solarRadiationHigh')
+            ),
         }
 
 
@@ -271,7 +292,8 @@ if __name__ == "__main__":
     status = monitor.get_weather_status()
     
     print(f"🌧️  Raining: {'Yes' if status['is_raining'] else 'No'}")
-    print(f"🚨 Suspend Alerts: {'Yes' if status['should_suspend_alerts'] else 'No'}")
+    suspend_flag = 'Yes' if status['should_suspend_alerts'] else 'No'
+    print(f"🚨 Suspend Alerts: {suspend_flag}")
     print(f"📝 Summary: {status['summary']}")
     
     if 'weather_data' in status:
@@ -281,6 +303,10 @@ if __name__ == "__main__":
         print(f"  💧 Humidity: {details.get('humidity', 'N/A')}%")
         print(f"  🌧️  Precip Rate: {details.get('precip_rate', 0)} in/hr")
         print(f"  📈 Precip Total: {details.get('precip_total', 0)} in")
+        print(
+            "  ☀️  Solar Radiation: "
+            f"{details.get('solar_radiation', 'N/A')} W/m^2"
+        )
     
     if status.get('error'):
         print(f"\n❌ Error: {status['error']}")

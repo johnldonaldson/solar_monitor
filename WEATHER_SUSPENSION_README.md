@@ -11,6 +11,7 @@ Added rain detection to automatically suspend solar panel alerts during rainy we
   - Active precipitation rate > 0.01 in/hr
   - Daily precipitation accumulation > 0.1 inches
   - Very high humidity ≥ 98% (indicates rain/storm conditions)
+- Captures solar radiation readings (W/m^2) for dashboard visibility
 - Caches data for 5 minutes to reduce API calls
 - Returns clear status with rain detection reasoning
 

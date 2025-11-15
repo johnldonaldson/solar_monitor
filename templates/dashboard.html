@@ -460,6 +460,7 @@
                 <div class="weather-metrics">
                     <div><span class="weather-metric-label">Temp:</span> <span id="weather-temp">--</span></div>
                     <div><span class="weather-metric-label">Humidity:</span> <span id="weather-humidity">--</span></div>
+                    <div><span class="weather-metric-label">Solar:</span> <span id="weather-radiation">--</span></div>
                     <div><span class="weather-metric-label">Precip Rate:</span> <span id="weather-precip-rate">--</span></div>
                     <div><span class="weather-metric-label">Daily Rain:</span> <span id="weather-precip-total">--</span></div>
                 </div>
@@ -759,6 +760,15 @@
                     weatherStatus.precip_total_in,
                     2,
                     ' in'
+                );
+            }
+
+            const solarElement = document.getElementById('weather-radiation');
+            if (solarElement) {
+                solarElement.textContent = formatValue(
+                    weatherStatus.solar_radiation_w_m2,
+                    0,
+                    ' W/m^2'
                 );
             }
 

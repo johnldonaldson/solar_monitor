@@ -2637,6 +2637,7 @@ def api_current():
         'summary': 'Weather monitoring unavailable',
         'is_raining': False,
         'should_suspend_alerts': False,
+        'solar_radiation_w_m2': None,
         'status_label': 'Weather monitoring unavailable'
     }
     alerts_suspended = False
@@ -2662,6 +2663,7 @@ def api_current():
                 'humidity_percent': weather_data.get('humidity'),
                 'precip_rate_in_hr': weather_data.get('precip_rate'),
                 'precip_total_in': weather_data.get('precip_total'),
+                'solar_radiation_w_m2': weather_data.get('solar_radiation'),
                 'observation_time': weather_data.get('observation_time'),
                 'source': weather_data.get('source'),
                 'cache_timestamp': weather_data.get('timestamp'),
