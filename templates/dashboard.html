@@ -52,9 +52,15 @@
         
         .grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-            gap: 20px;
+            grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+            gap: 18px;
             margin-bottom: 30px;
+        }
+
+        @media (min-width: 1200px) {
+            .grid {
+                grid-template-columns: repeat(5, minmax(220px, 1fr));
+            }
         }
         
         .card {
@@ -166,6 +172,59 @@
             background-color: #d4edda;
             color: #155724;
             border-left-color: #28a745;
+        }
+
+        .weather-summary {
+            font-size: 1.1em;
+            color: #2c3e50;
+            margin-bottom: 8px;
+        }
+
+        .weather-metrics {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+            gap: 6px 12px;
+            font-size: 0.9em;
+            color: #555;
+        }
+
+        .weather-metric-label {
+            font-weight: 600;
+            margin-right: 4px;
+        }
+
+        .weather-observed {
+            margin-top: 10px;
+            font-size: 0.85em;
+            color: #666;
+        }
+
+        .weather-reasons {
+            margin: 8px 0 6px 0;
+            padding-left: 20px;
+            font-size: 0.85em;
+            color: #555;
+        }
+
+        .weather-reasons.hidden {
+            display: none;
+        }
+
+        .weather-alert-banner {
+            margin-top: 12px;
+            padding: 10px 12px;
+            border-radius: 8px;
+            font-size: 0.9em;
+            font-weight: 600;
+            color: #166534;
+            background: #dcfce7;
+            border: 1px solid #bbf7d0;
+        }
+
+        .weather-alert-banner.active {
+            color: #92400e;
+            background: #fef3c7;
+            border-color: #fcd34d;
         }
         
         .health-status {
@@ -389,6 +448,28 @@
                     <div class="progress-fill" id="inverter-progress" style="width: 0%"></div>
                 </div>
             </div>
+
+            <!-- Weather Status -->
+            <div class="card">
+                <div class="card-title">
+                    <span class="icon">🌦️</span>
+                    Weather & Alerts
+                </div>
+                <div id="weather-summary" class="weather-summary">Loading weather...</div>
+                <div id="weather-line" class="weather-line" style="font-size: 0.9em; color: #444; margin-bottom: 8px;">&nbsp;</div>
+                <div class="weather-metrics">
+                    <div><span class="weather-metric-label">Temp:</span> <span id="weather-temp">--</span></div>
+                    <div><span class="weather-metric-label">Humidity:</span> <span id="weather-humidity">--</span></div>
+                    <div><span class="weather-metric-label">Precip Rate:</span> <span id="weather-precip-rate">--</span></div>
+                    <div><span class="weather-metric-label">Daily Rain:</span> <span id="weather-precip-total">--</span></div>
+                </div>
+                <div class="weather-observed">
+                    Last observation: <span id="weather-observed">--</span>
+                </div>
+                <div id="weather-alert-banner" class="weather-alert-banner">
+                    Checking alert status...
+                </div>
+            </div>
         </div>
         
         <!-- Power Chart -->
@@ -510,6 +591,7 @@
                 .then(data => {
                     updateMainMetrics(data);
                     updateSystemHealth(data);
+                    updateWeather(data);
                     updateInverters(data);
                     updateAlerts(data);
                     updateChart();
@@ -604,6 +686,112 @@
             // Update inverter progress
             const inverterProgress = total > 0 ? (active / total) * 100 : 0;
             document.getElementById('inverter-progress').style.width = `${inverterProgress}%`;
+        }
+
+        function updateWeather(data) {
+            const weatherStatus = data.weather_status || {};
+            const summaryElement = document.getElementById('weather-summary');
+            const lineElement = document.getElementById('weather-line');
+            if (!summaryElement || !lineElement) {
+                return;
+            }
+
+            const formatValue = (value, digits, unit) => {
+                if (typeof value === 'number' && !Number.isNaN(value)) {
+                    return `${value.toFixed(digits)}${unit}`;
+                }
+                if (typeof value === 'string' && value.trim() !== '') {
+                    return `${value}${unit}`;
+                }
+                return '--';
+            };
+
+            const isRaining = Boolean(weatherStatus.is_raining);
+            summaryElement.textContent = isRaining ? 'Rain detected' : 'No rain detected';
+
+            if (data.alerts_suspended_due_to_weather) {
+                lineElement.textContent = '';
+            } else if (weatherStatus.summary) {
+                const colonIndex = weatherStatus.summary.indexOf(':');
+                let detail = weatherStatus.summary;
+                if (colonIndex > -1) {
+                    detail = weatherStatus.summary.slice(colonIndex + 1).trim();
+                }
+                const commaIndex = detail.indexOf(',');
+                if (commaIndex > -1) {
+                    detail = detail.slice(0, commaIndex).trim();
+                }
+                lineElement.textContent = detail ? `Condition detail: ${detail}` : '';
+            } else {
+                lineElement.textContent = '';
+            }
+
+            const tempElement = document.getElementById('weather-temp');
+            if (tempElement) {
+                tempElement.textContent = formatValue(
+                    weatherStatus.temperature_f,
+                    1,
+                    '°F'
+                );
+            }
+
+            const humidityElement = document.getElementById('weather-humidity');
+            if (humidityElement) {
+                humidityElement.textContent = formatValue(
+                    weatherStatus.humidity_percent,
+                    0,
+                    '%'
+                );
+            }
+
+            const precipRateElement = document.getElementById('weather-precip-rate');
+            if (precipRateElement) {
+                precipRateElement.textContent = formatValue(
+                    weatherStatus.precip_rate_in_hr,
+                    2,
+                    ' in/hr'
+                );
+            }
+
+            const precipTotalElement = document.getElementById('weather-precip-total');
+            if (precipTotalElement) {
+                precipTotalElement.textContent = formatValue(
+                    weatherStatus.precip_total_in,
+                    2,
+                    ' in'
+                );
+            }
+
+            const observedElement = document.getElementById('weather-observed');
+            if (observedElement) {
+                let observedDisplay = '--';
+                if (weatherStatus.observation_time) {
+                    const isoCandidate = weatherStatus.observation_time.replace(' ', 'T');
+                    const observedDate = new Date(isoCandidate);
+                    if (!Number.isNaN(observedDate.getTime())) {
+                        observedDisplay = observedDate.toLocaleString();
+                    } else {
+                        observedDisplay = weatherStatus.observation_time;
+                    }
+                } else if (weatherStatus.cache_timestamp) {
+                    const observedDate = new Date(weatherStatus.cache_timestamp);
+                    if (!Number.isNaN(observedDate.getTime())) {
+                        observedDisplay = observedDate.toLocaleTimeString();
+                    }
+                }
+                observedElement.textContent = observedDisplay;
+            }
+
+            const bannerElement = document.getElementById('weather-alert-banner');
+            if (bannerElement) {
+                if (data.alerts_suspended_due_to_weather) {
+                    bannerElement.textContent = '🚫 Alerts suspended due to rain';
+                    bannerElement.classList.add('active');
+                } else {
+                    bannerElement.textContent = '✅ Alerts running normally';
+                    bannerElement.classList.remove('active');
+                }
+            }
         }
         
         function updateInverters(data) {

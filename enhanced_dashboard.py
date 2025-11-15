@@ -2632,6 +2632,54 @@ def api_current():
             }
         except Exception:
             pass
+
+    weather_payload = {
+        'summary': 'Weather monitoring unavailable',
+        'is_raining': False,
+        'should_suspend_alerts': False,
+        'status_label': 'Weather monitoring unavailable'
+    }
+    alerts_suspended = False
+
+    weather_monitor = getattr(dashboard.alert_manager, 'weather_monitor', None)
+    if weather_monitor:
+        try:
+            weather_status = weather_monitor.get_weather_status()
+            weather_data = weather_status.get('weather_data', {}) or {}
+            alerts_suspended = bool(
+                weather_status.get('should_suspend_alerts', False)
+            )
+
+            is_raining = bool(weather_status.get('is_raining', False))
+            weather_payload = {
+                'summary': weather_status.get(
+                    'summary',
+                    'Weather data unavailable'
+                ),
+                'is_raining': is_raining,
+                'should_suspend_alerts': alerts_suspended,
+                'temperature_f': weather_data.get('temp'),
+                'humidity_percent': weather_data.get('humidity'),
+                'precip_rate_in_hr': weather_data.get('precip_rate'),
+                'precip_total_in': weather_data.get('precip_total'),
+                'observation_time': weather_data.get('observation_time'),
+                'source': weather_data.get('source'),
+                'cache_timestamp': weather_data.get('timestamp'),
+                'status_label': (
+                    'Rain detected' if is_raining else 'No rain detected'
+                )
+            }
+        except Exception as error:
+            weather_payload = {
+                'summary': 'Weather data unavailable',
+                'is_raining': False,
+                'should_suspend_alerts': False,
+                'error': str(error),
+                'status_label': 'Weather data unavailable'
+            }
+
+    current_data['weather_status'] = weather_payload
+    current_data['alerts_suspended_due_to_weather'] = alerts_suspended
     
     return jsonify(current_data)
 

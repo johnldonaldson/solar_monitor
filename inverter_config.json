@@ -1,0 +1,178 @@
+{
+  "description": "Active inverter configuration for solar array management and intelligent timing learning",
+  "last_updated": "2025-08-07T11:01:18.548646",
+  "version": "1.0",
+  "inverters": {
+    "-1863319184": {
+      "serial": "90F00170",
+      "position": 1,
+      "array": "east",
+      "description": "East-facing array inverter",
+      "last_updated": "2025-08-07T10:21:54.324190"
+    },
+    "-1863319181": {
+      "serial": "90F00173",
+      "position": 2,
+      "array": "east",
+      "description": "East-facing array inverter"
+    },
+    "-1863319160": {
+      "serial": "90F00188",
+      "position": 3,
+      "array": "east",
+      "description": "East-facing array inverter"
+    },
+    "-1863319204": {
+      "serial": "90F0015C",
+      "position": 4,
+      "array": "east",
+      "description": "East-facing array inverter"
+    },
+    "-1053817559": {
+      "serial": "C1300529",
+      "position": 5,
+      "array": "east",
+      "description": "East-facing array inverter (replacement)"
+    },
+    "-1863319143": {
+      "serial": "90F00199",
+      "position": 6,
+      "array": "east",
+      "description": "South-facing array inverter",
+      "last_updated": "2025-08-07T10:27:44.572950"
+    },
+    "-1863319173": {
+      "serial": "90F0017B",
+      "position": 7,
+      "array": "south",
+      "description": "South-facing array inverter",
+      "last_updated": "2025-08-07T11:01:18.548593"
+    },
+    "-1863319193": {
+      "serial": "90F00167",
+      "position": 9,
+      "array": "south",
+      "description": "South-facing array inverter"
+    },
+    "-1863319119": {
+      "serial": "90F001B1",
+      "position": 10,
+      "array": "south",
+      "description": "South-facing array inverter"
+    },
+    "-1863319163": {
+      "serial": "90F00185",
+      "position": 11,
+      "array": "south",
+      "description": "South-facing array inverter"
+    },
+    "-1863319114": {
+      "serial": "90F001B6",
+      "position": 12,
+      "array": "south",
+      "description": "South-facing array inverter"
+    },
+    "-1863319168": {
+      "serial": "90F00180",
+      "position": 13,
+      "array": "south",
+      "description": "South-facing array inverter"
+    },
+    "-1863319174": {
+      "serial": "90F0017A",
+      "position": 14,
+      "array": "south",
+      "description": "South-facing array inverter"
+    },
+    "-1863319169": {
+      "serial": "90F0017F",
+      "position": 15,
+      "array": "south",
+      "description": "South-facing array inverter"
+    },
+    "-1863319121": {
+      "serial": "90F001AF",
+      "position": 16,
+      "array": "south",
+      "description": "South-facing array inverter"
+    },
+    "-1863319161": {
+      "serial": "90F00187",
+      "position": 17,
+      "array": "south",
+      "description": "South-facing array inverter"
+    },
+    "-1863319170": {
+      "serial": "90F0017E",
+      "position": 18,
+      "array": "south",
+      "description": "South-facing array inverter"
+    },
+    "-1863319179": {
+      "serial": "90F00175",
+      "position": 19,
+      "array": "south",
+      "description": "South-facing array inverter"
+    },
+    "1093666578": {
+      "serial": "41300712",
+      "position": 20,
+      "array": "east",
+      "description": "South-facing array inverter (replacement)",
+      "last_updated": "2025-08-07T10:25:11.197023"
+    },
+    "-1863319123": {
+      "serial": "90F001AD",
+      "position": 21,
+      "array": "east",
+      "description": "East array inverter (reassigned from west)"
+    },
+    "-1863319078": {
+      "serial": "90F001DA",
+      "position": 22,
+      "array": "east",
+      "description": "East array inverter (reassigned from west)"
+    },
+    "-1863319180": {
+      "serial": "90F00174",
+      "position": 23,
+      "array": "east",
+      "description": "East array inverter (reassigned from west)"
+    },
+    "-1863319171": {
+      "serial": "90F0017D",
+      "position": 24,
+      "array": "east",
+      "description": "East array inverter (reassigned from west)"
+    },
+    "1902118887": {
+      "serial": "716007E7",
+      "position": 25,
+      "array": "east",
+      "description": "South-facing array inverter (new replacement)",
+      "last_updated": "2025-08-07T10:24:40.353415"
+    },
+    "1902121595": {
+      "serial": "7160127B",
+      "position": 26,
+      "array": "south",
+      "description": "South-facing array inverter (new replacement)"
+    }
+  },
+  "arrays": {
+    "east": {
+      "description": "East-facing array - first to wake up in morning",
+      "orientation": "east",
+      "expected_wake_time": "06:30",
+      "expected_sleep_time": "15:00",
+      "inverter_count": 12
+    },
+    "south": {
+      "description": "South-facing array - main production array",
+      "orientation": "south",
+      "expected_wake_time": "07:00",
+      "expected_sleep_time": "17:30",
+      "inverter_count": 13
+    }
+  }
+}

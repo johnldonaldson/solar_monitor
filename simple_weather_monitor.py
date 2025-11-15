@@ -61,6 +61,7 @@ class SimpleWeatherMonitor:
                     ),
                     'precip_rate': latest.get('precip_rate'),
                     'precip_total': latest.get('precip_total'),
+                    'observation_time': latest.get('observation_time'),
                     'source': 'observations_json',
                 }
             else:
@@ -71,6 +72,7 @@ class SimpleWeatherMonitor:
                     'humidity': self._extract_humidity(html),
                     'precip_rate': self._extract_precip_rate(html),
                     'precip_total': self._extract_precip_total(html),
+                    'observation_time': None,
                     'source': 'regex_fallback',
                 }
             

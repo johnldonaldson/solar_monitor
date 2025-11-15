@@ -1,0 +1,45 @@
+# macOS / IDE artifacts
+.DS_Store
+.vscode/
+
+# Python caches
+__pycache__/
+*.py[cod]
+
+# Runtime state files
+alert_state.json
+power_history_cache.json
+inverter_production_history.json
+monitor_config.json
+simple_weather_cache.json
+weather_cache.json
+
+# Generated reports
+daily_reports/
+
+# Local credentials
+email_config.json
+imessage_config.json
+
+# Generated logs and directories
+logs/
+monitoring_data/
+*.log
+
+# Data captures and diagnostics
+microinverter_power_*.json
+debug_power_arrays_*.json
+NIGHTTIME_INVERTER_DATA_*.json
+uniform_60w_tracking_*.json
+enhanced_array_data_*.json
+health_report_*.json
+legacy_power_data_*.json
+best_power_data_*.json
+
+# Build / deployment artifacts
+enhanced_dashboard_package_*.zip
+cloud-chilicon-test.py.zip
+
+# Snapshots and cached HTML
+installation_page_*.html
+login_page_*.html
