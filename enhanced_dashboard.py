@@ -6,93 +6,44 @@ Real-time dashboard with direct data fetching
 
 import os
 import json
-import math
 import re
 import time
 import statistics
 import threading
 import traceback
 import smtplib
-import subprocess
+import copy
 import requests
 from pathlib import Path
 from datetime import datetime, timedelta
 from email.mime.text import MIMEText
 from flask import Flask, render_template, jsonify, request
 from legacy_chilicon_monitor import ChiliconLegacyMonitor
-from final_microinverter_extractor import MicroinverterPowerExtractor
-from inverter_alert_manager import InverterAlertManager
+from inverter_alert_manager import InverterAlertManager, calculate_sunset_time
 from intelligent_inverter_timing import create_timing_intelligence_integration
 
 app = Flask(__name__)
 
+# --- Configuration Constants ---
+CHILICON_USERNAME = "johnldonaldson@gmail.com"
+CHILICON_PASSWORD = "P0pc0rn1"
+INSTALLATION_ID = "384b18e73cb8a7c9364ecbb2b220f774fc815d7aa4126ee574d64f8152ab11c7"
+INSTALLATION_URL = f"https://cloud.chiliconpower.com/installation/{INSTALLATION_ID}"
+DEFAULT_TOTAL_INVERTERS = 25
+UPDATE_INTERVAL_SECONDS = 900    # 15 minutes
+SUNSET_BUFFER_MINUTES = 30
+POWER_THRESHOLD_KW = 0.01        # ~10 W minimum active power
+LOW_POWER_THRESHOLD_KW = 0.1     # 100 W threshold for meaningful generation
+DEFAULT_HISTORY_HOURS = 24
 
-def calculate_sunset_time(latitude=37.7749, longitude=-122.4194):
-    """
-    Calculate sunset time for given coordinates (defaults to San Francisco)
-    Returns sunset time as datetime object for today
-    """
-    try:
-        from datetime import date
-        
-        # Julian day calculation
-        today = date.today()
-        n = today.timetuple().tm_yday
-        
-        # Solar declination
-        solar_declination = 23.45 * math.sin(math.radians(360 * (284 + n) / 365))
-        
-        # Hour angle
-        lat_rad = math.radians(latitude)
-        decl_rad = math.radians(solar_declination)
-        
-        cos_hour_angle = -math.tan(lat_rad) * math.tan(decl_rad)
-        
-        # Check for polar day/night
-        if cos_hour_angle > 1:
-            # Polar night - no sunset
-            return datetime.combine(today, datetime.min.time().replace(hour=17))
-        elif cos_hour_angle < -1:
-            # Polar day - no sunset
-            return datetime.combine(today, datetime.min.time().replace(hour=21))
-        
-        hour_angle = math.degrees(math.acos(cos_hour_angle))
-        
-        # Calculate sunset time in hours from solar noon
-        sunset_hour = 12 + hour_angle / 15
-        
-        # Convert to datetime
-        sunset_hours = int(sunset_hour)
-        sunset_minutes = int((sunset_hour - sunset_hours) * 60)
-        
-        sunset_time = datetime.combine(
-            today, 
-            datetime.min.time().replace(hour=sunset_hours, minute=sunset_minutes)
-        )
-        
-        return sunset_time
-        
-    except Exception as e:
-        print(f"⚠️ Sunset calculation error: {e}, using default 6 PM")
-        # Fallback to 6 PM
-        return datetime.combine(date.today(), datetime.min.time().replace(hour=18))
 
 
 class EnhancedDashboard:
     def __init__(self):
         self.monitor = ChiliconLegacyMonitor()
-        self.username = "johnldonaldson@gmail.com"
-        self.password = "P0pc0rn1"
-        
-        # Initialize microinverter power extractor
-        self.microinverter_extractor = MicroinverterPowerExtractor(
-            self.username, self.password
-        )
-        
-        self.installation_url = (
-            "https://cloud.chiliconpower.com/installation/"
-            "384b18e73cb8a7c9364ecbb2b220f774fc815d7aa4126ee574d64f8152ab11c7"
-        )
+        self.username = CHILICON_USERNAME
+        self.password = CHILICON_PASSWORD
+        self.installation_url = INSTALLATION_URL
         
         # Live data storage
         self.current_data = {
@@ -101,7 +52,7 @@ class EnhancedDashboard:
             'energy_today_kwh': 0,
             'lifetime_energy_mwh': 0,
             'active_inverters': 0,
-            'total_inverters': 25,
+            'total_inverters': DEFAULT_TOTAL_INVERTERS,
             'health_status': 'Unknown',
             'alerts': [],
             'individual_inverters': [],
@@ -119,12 +70,15 @@ class EnhancedDashboard:
         
         # Session management - track last website access
         self.last_website_access = None
-        self.website_interval = 900  # 15 minutes in seconds
+        self.website_interval = UPDATE_INTERVAL_SECONDS
+        # Cache for inverter config to avoid re-reading file on every API call
+        self._inverter_config_cache = None
+        self._inverter_config_mtime = None
         
         # Daily report management
         self.daily_report_sent_today = False
         self.last_daily_report_date = None
-        self.sunset_buffer_minutes = 30  # Wait 30 minutes after sunset
+        self.sunset_buffer_minutes = SUNSET_BUFFER_MINUTES
         
         # Initialize intelligent alert manager
         self.alert_manager = InverterAlertManager()
@@ -169,30 +123,6 @@ class EnhancedDashboard:
         self.daily_report_thread.daemon = True
         self.daily_report_thread.start()
     
-    def _load_inverter_config(self):
-        """Load inverter configuration from JSON file"""
-        try:
-            config_file = 'inverter_config.json'
-            if not os.path.exists(config_file):
-                print(f"⚠️ Inverter config file not found: {config_file}")
-                return {}
-            
-            with open(config_file, 'r') as f:
-                config = json.load(f)
-            
-            # Convert to simple ID -> serial mapping
-            inverter_map = {}
-            for inverter_id_str, inverter_info in config.get('inverters', {}).items():
-                inverter_id = int(inverter_id_str)
-                inverter_map[inverter_id] = inverter_info['serial']
-            
-            print(f"✅ Loaded {len(inverter_map)} inverters from config")
-            return inverter_map
-            
-        except Exception as e:
-            print(f"❌ Error loading inverter config: {e}")
-            return {}
-    
     def _save_inverter_config(self, config):
         """Save inverter configuration to JSON file"""
         try:
@@ -202,6 +132,9 @@ class EnhancedDashboard:
             with open(config_file, 'w') as f:
                 json.dump(config, f, indent=2)
             
+            # Invalidate config cache so next read picks up the new file
+            self._inverter_config_cache = None
+            self._inverter_config_mtime = None
             print(f"✅ Saved inverter configuration")
             return True
             
@@ -288,14 +221,14 @@ class EnhancedDashboard:
             info['max_power'] = max(info.get('max_power', 0.0), current_power)
             info['last_seen'] = now.isoformat()
 
-            if current_power > 0.01:
+            if current_power > POWER_THRESHOLD_KW:
                 info['ever_active'] = True
 
             if delta_minutes > 0:
                 info['total_minutes'] = (
                     info.get('total_minutes', 0) + delta_minutes
                 )
-                if current_power > 0.01:
+                if current_power > POWER_THRESHOLD_KW:
                     info['active_minutes'] = (
                         info.get('active_minutes', 0) + delta_minutes
                     )
@@ -470,15 +403,23 @@ class EnhancedDashboard:
         self.daily_report_history = self.daily_report_history[-14:]
 
     def get_inverter_config(self):
-        """Get full inverter configuration including array assignments"""
+        """Get full inverter configuration including array assignments (cached)."""
         try:
             config_file = 'inverter_config.json'
             if not os.path.exists(config_file):
                 return {'inverters': {}, 'arrays': {}}
-            
+
+            mtime = os.path.getmtime(config_file)
+            if self._inverter_config_cache is not None and mtime == self._inverter_config_mtime:
+                return copy.deepcopy(self._inverter_config_cache)
+
             with open(config_file, 'r') as f:
-                return json.load(f)
-                
+                config = json.load(f)
+
+            self._inverter_config_cache = config
+            self._inverter_config_mtime = mtime
+            return copy.deepcopy(config)
+
         except Exception as e:
             print(f"❌ Error loading inverter config: {e}")
             return {'inverters': {}, 'arrays': {}}
@@ -553,7 +494,7 @@ class EnhancedDashboard:
                 self.debug_info['last_operation'] = 'sleeping'
                 sleep_start = datetime.now()
                 self.debug_info['sleep_start_time'] = sleep_start.isoformat()
-                target_sleep_seconds = 900  # 15 minutes
+                target_sleep_seconds = UPDATE_INTERVAL_SECONDS  # 15 minutes
                 
                 print(f"   💤 Sleeping for 15 minutes until {(sleep_start + timedelta(seconds=target_sleep_seconds)).strftime('%H:%M:%S')}")
                 
@@ -604,7 +545,7 @@ class EnhancedDashboard:
                     time.sleep(1800)  # 30 minutes
                     consecutive_errors = 0  # Reset after extended sleep
                 else:
-                    sleep_duration = min(900, 300 * consecutive_errors)  # 5min, 10min, 15min
+                    sleep_duration = min(UPDATE_INTERVAL_SECONDS, 300 * consecutive_errors)  # 5min, 10min, 15min
                     print(f"⚠️ Sleeping {sleep_duration/60:.0f} minutes before retry...")
                     time.sleep(sleep_duration)
         
@@ -622,7 +563,7 @@ class EnhancedDashboard:
             last_update = datetime.fromisoformat(last_update_str)
             now = datetime.now()
             time_diff = (now - last_update).total_seconds()
-            return time_diff >= 900  # 15 minutes = 900 seconds
+            return time_diff >= UPDATE_INTERVAL_SECONDS  # 15 minutes
         except Exception:
             return True
     
@@ -647,11 +588,11 @@ class EnhancedDashboard:
                     self._send_automatic_daily_report()
                 
                 # Check every 15 minutes
-                time.sleep(900)
+                time.sleep(UPDATE_INTERVAL_SECONDS)
                 
             except Exception as e:
                 print(f"❌ Daily report scheduler error: {e}")
-                time.sleep(900)
+                time.sleep(UPDATE_INTERVAL_SECONDS)
     
     def _should_send_daily_report(self):
         """Check if it's time to send the daily report (after sunset + buffer)"""
@@ -778,7 +719,7 @@ class EnhancedDashboard:
                 )
                 avg_power = total_power / len(today_history)
                 productive_samples = sum(
-                    1 for entry in today_history if entry['power'] > 0.1
+                    1 for entry in today_history if entry['power'] > LOW_POWER_THRESHOLD_KW
                 )
                 production_hours = productive_samples / 4
 
@@ -868,7 +809,7 @@ Next report will be sent tomorrow after sunset (~{(sunset_time + timedelta(days=
                 'dashboard_snapshot': {
                     'power_kw': current_data.get('power_kw', 0),
                     'active_inverters': current_data.get('active_inverters', 0),
-                    'total_inverters': current_data.get('total_inverters', 25),
+                    'total_inverters': current_data.get('total_inverters', DEFAULT_TOTAL_INVERTERS),
                     'health_status': current_data.get('health_status', 'Unknown'),
                     'is_online': current_data.get('is_online'),
                     'last_update': current_data.get('last_update'),
@@ -995,30 +936,7 @@ Next report will be sent tomorrow after sunset (~{(sunset_time + timedelta(days=
                 # Save power history to cache
                 self._save_power_history()
                 
-                # Get inverter data
-                inverter_data = monitor.get_individual_inverter_data(
-                    self.installation_url
-                )
-                
-                if inverter_data:
-                    self.current_data.update({
-                        'active_inverters': (
-                            inverter_data.get('active_inverters', 0)
-                        ),
-                        'total_inverters': (
-                            inverter_data.get('total_inverters', 25)
-                        )
-                    })
-                    
-                    # Health analysis
-                    health = monitor.check_inverter_health(inverter_data)
-                    if health:
-                        self.current_data['health_status'] = (
-                            health.get('health_status', 'Unknown')
-                        )
-                        self.current_data['alerts'] = health.get('issues', [])
-                
-                # Fetch detailed individual inverter analysis data
+                # Fetch detailed individual inverter analysis data (AJAX-based, accurate)
                 print("🔍 Fetching detailed individual inverter analysis...")
                 detailed_stats = self._fetch_individual_inverter_data()
                 if detailed_stats:
@@ -1043,7 +961,7 @@ Next report will be sent tomorrow after sunset (~{(sunset_time + timedelta(days=
                             'serial': serial,
                             'power_w': current_power,  # Keep in kW for display
                             'power': current_power,    # Keep in kW
-                            'status': 'active' if current_power > 0.01 else 'inactive',
+                            'status': 'active' if current_power > POWER_THRESHOLD_KW else 'inactive',
                             'timestamp': datetime.now().isoformat(),
                             'max_power_today': stats.get('max_power', current_power),
                             'avg_power': stats.get('avg_positive_power', current_power),
@@ -1054,10 +972,38 @@ Next report will be sent tomorrow after sunset (~{(sunset_time + timedelta(days=
                     self._update_daily_production(detailed_stats)
                     self._refresh_daily_production_snapshot()
                     
-                    # Update active inverters count from new data
-                    active_count = len([s for s in detailed_stats if s['current_power'] > 0.01])
+                    # Update active inverters count from AJAX data
+                    active_count = len([s for s in detailed_stats if s['current_power'] > POWER_THRESHOLD_KW])
                     self.current_data['active_inverters'] = active_count
-                    print(f"✅ Updated individual inverters: {active_count}/25 active")
+                    self.current_data['total_inverters'] = DEFAULT_TOTAL_INVERTERS
+                    print(f"✅ Updated individual inverters: {active_count}/{DEFAULT_TOTAL_INVERTERS} active")
+
+                    # Derive health status directly from AJAX data
+                    activity_rate = active_count / DEFAULT_TOTAL_INVERTERS
+                    avg_active_power = (
+                        sum(s['current_power'] for s in detailed_stats if s['current_power'] > POWER_THRESHOLD_KW)
+                        / active_count if active_count else 0
+                    )
+                    underperforming = len([
+                        s for s in detailed_stats
+                        if POWER_THRESHOLD_KW < s['current_power'] < avg_active_power * 0.7
+                    ])
+                    not_active = DEFAULT_TOTAL_INVERTERS - active_count
+                    health_issues = []
+                    if activity_rate >= 0.95 and underperforming == 0:
+                        health_status = "🟢 EXCELLENT"
+                    elif activity_rate >= 0.85:
+                        health_status = "🟡 GOOD"
+                    elif activity_rate >= 0.70:
+                        health_status = "🔶 FAIR"
+                    else:
+                        health_status = "🔴 POOR"
+                    if not_active > 0:
+                        health_issues.append(f"{not_active} inverter(s) not active")
+                    if underperforming > 0:
+                        health_issues.append(f"{underperforming} underperforming inverter(s)")
+                    self.current_data['health_status'] = health_status
+                    self.current_data['alerts'] = health_issues
                     
                     # *** INTELLIGENT TIMING ANALYSIS ***
                     # Analyze timing patterns and learn from inverter behavior
@@ -1226,8 +1172,8 @@ Next report will be sent tomorrow after sunset (~{(sunset_time + timedelta(days=
                 # AJAX endpoint returns power values in watts directly (250W panels)
                 power_watts = float(power_data['power_kw'])  # Already in watts, not kW
                 
-                # Determine status based on 0.01 kW (~10W) threshold
-                if power_watts > 0.01:
+                # Determine status based on POWER_THRESHOLD_KW (~10W) threshold
+                if power_watts > POWER_THRESHOLD_KW:
                     status = 'active'
                 elif power_watts > 0:
                     status = 'low_power'
@@ -1395,7 +1341,7 @@ Next report will be sent tomorrow after sunset (~{(sunset_time + timedelta(days=
     def get_recent_production_history(self, days=7):
         """Return recent inverter production records."""
         recent = self.production_history[-days:]
-        return json.loads(json.dumps(recent))  # Deep-copy via serialization
+        return copy.deepcopy(recent)  # Deep copy
 
 
 # Global dashboard instance
@@ -1421,7 +1367,7 @@ def debug_status():
                 last_update = datetime.fromisoformat(dashboard.current_data['last_update'])
                 age_seconds = (datetime.now() - last_update).total_seconds()
                 status['cache_age_minutes'] = round(age_seconds / 60, 1)
-                status['next_update_minutes'] = max(0, round((900 - age_seconds) / 60, 1))
+                status['next_update_minutes'] = max(0, round((UPDATE_INTERVAL_SECONDS - age_seconds) / 60, 1))
             except:
                 pass
         
@@ -1813,8 +1759,6 @@ def get_inverter_production_history():
 def get_sunset_info():
     """Get sunset information"""
     try:
-        from inverter_alert_manager import calculate_sunset_time
-        
         sunset_time = calculate_sunset_time()
         
         return jsonify({
@@ -2170,61 +2114,6 @@ def add_inverter():
         })
 
 
-@app.route('/api/admin/inverters/remove', methods=['POST'])
-def remove_inverter():
-    """Remove an inverter from the configuration"""
-    try:
-        data = request.get_json()
-        inverter_id = data.get('id')
-        
-        if not inverter_id:
-            return jsonify({
-                'success': False,
-                'error': 'Inverter ID is required'
-            })
-        
-        # Load current configuration
-        config = dashboard.get_inverter_config()
-        
-        # Check if inverter exists
-        inverter_id_str = str(inverter_id)
-        if inverter_id_str not in config.get('inverters', {}):
-            return jsonify({
-                'success': False,
-                'error': f'Inverter {inverter_id} not found'
-            })
-        
-        # Get inverter info before removal
-        inverter_info = config['inverters'][inverter_id_str]
-        serial = inverter_info['serial']
-        
-        # Remove inverter
-        del config['inverters'][inverter_id_str]
-        
-        # Update array counts
-        for array_key in config.get('arrays', {}):
-            count = len([inv for inv in config['inverters'].values() if inv['array'] == array_key])
-            config['arrays'][array_key]['inverter_count'] = count
-        
-        # Save configuration
-        if dashboard._save_inverter_config(config):
-            return jsonify({
-                'success': True,
-                'message': f'Removed inverter {serial}'
-            })
-        else:
-            return jsonify({
-                'success': False,
-                'error': 'Failed to save configuration'
-            })
-            
-    except Exception as e:
-        return jsonify({
-            'success': False,
-            'error': f'Failed to remove inverter: {str(e)}'
-        })
-
-
 @app.route('/api/admin/array-groups', methods=['GET'])
 def get_array_groups():
     """Get detailed array group information"""
@@ -2253,7 +2142,7 @@ def get_array_groups():
                 timing_info = timing_summary.get(serial, {})
                 current_power = current_power_map.get(serial, 0)
                 
-                if current_power > 0.01:
+                if current_power > POWER_THRESHOLD_KW:
                     active_count += 1
                 total_current_power += current_power
                 
@@ -2266,7 +2155,7 @@ def get_array_groups():
                     'reliability': timing_info.get('reliability_score', 0),
                     'days_of_data': timing_info.get('days_of_data', 0),
                     'current_power': current_power,
-                    'is_active': current_power > 0.01
+                    'is_active': current_power > POWER_THRESHOLD_KW
                 })
             
             enhanced_groups[group_name] = {
@@ -2623,7 +2512,7 @@ def api_current():
             last_update = datetime.fromisoformat(current_data['last_update'])
             age_seconds = (datetime.now() - last_update).total_seconds()
             age_minutes = round(age_seconds / 60, 1)
-            next_update_minutes = max(0, round((900 - age_seconds) / 60, 1))
+            next_update_minutes = max(0, round((UPDATE_INTERVAL_SECONDS - age_seconds) / 60, 1))
             
             current_data['cache_info'] = {
                 'age_minutes': age_minutes,
@@ -2646,7 +2535,8 @@ def api_current():
     if weather_monitor:
         try:
             weather_status = weather_monitor.get_weather_status()
-            weather_data = weather_status.get('weather_data', {}) or {}
+            # Fields are returned flat at the top level (no nested 'weather_data' key)
+            weather_data = weather_status
             alerts_suspended = bool(
                 weather_status.get('should_suspend_alerts', False)
             )
@@ -2707,7 +2597,7 @@ def api_inverters():
         'individual_inverters': data.get('individual_inverters', []),
         'detailed_inverter_stats': data.get('detailed_inverter_stats', []),
         'active_inverters': data.get('active_inverters', 0),
-        'total_inverters': data.get('total_inverters', 25),
+        'total_inverters': data.get('total_inverters', DEFAULT_TOTAL_INVERTERS),
         'last_update': data.get('last_update'),
         'is_online': data.get('is_online', False)
     })
@@ -2812,85 +2702,6 @@ def api_timing_anomalies():
         })
 
 
-@app.route('/api/debug/raw-website-data')
-def debug_raw_website_data():
-    """Debug endpoint to show raw website data vs our configuration"""
-    try:
-        global chilicon_api
-        if not chilicon_api:
-            return jsonify({'error': 'API not initialized'})
-        
-        # Get the raw individual inverter data
-        individual_data = chilicon_api._fetch_individual_inverter_data()
-        
-        # Load our configuration  
-        config_map = chilicon_api._load_inverter_config()
-        
-        # Extract inverter IDs from raw data
-        website_ids = set()
-        sample_entries = []
-        
-        # Temporarily call the private method to get raw data
-        import requests
-        from collections import defaultdict
-        today = datetime.now().strftime("%Y-%m-%d")
-        fetchdata_url = f"https://cloud.chiliconpower.com/ajax/fetchData?selection=p_out_avg&lastDay={today}&timeSpan=1&aggregateView=none"
-        
-        # Create session and login
-        session = requests.Session()
-        session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36'
-        })
-        
-        # Login
-        login_data = {'username': chilicon_api.username, 'password': chilicon_api.password}
-        response = session.post("https://cloud.chiliconpower.com/login", data=login_data, allow_redirects=True)
-        
-        if "dashboard" in response.url.lower() or "installation" in response.url.lower():
-            # Access installation page
-            session.get(chilicon_api.installation_url)
-            session.headers.update({'Referer': chilicon_api.installation_url})
-            
-            # Fetch raw data
-            response = session.get(fetchdata_url)
-            if response.status_code == 200:
-                raw_data = response.json()
-                
-                for entry in raw_data:
-                    if len(entry) >= 3:
-                        timestamp, power_kw, inverter_id = entry[0], entry[1], entry[2]
-                        website_ids.add(inverter_id)
-                        if len(sample_entries) < 20:  # Sample first 20 entries
-                            sample_entries.append({
-                                'timestamp': timestamp,
-                                'power_kw': power_kw,
-                                'inverter_id': inverter_id,
-                                'configured': inverter_id in config_map,
-                                'serial': config_map.get(inverter_id, f"UNCONFIGURED_{inverter_id}")
-                            })
-                
-                # Analysis
-                configured_ids = set(config_map.keys())
-                missing_from_website = configured_ids - website_ids
-                missing_from_config = website_ids - configured_ids
-                
-                return jsonify({
-                    'success': True,
-                    'raw_data_count': len(raw_data),
-                    'website_inverter_ids': sorted(list(website_ids)),
-                    'configured_inverter_ids': sorted(list(configured_ids)),
-                    'missing_from_website': sorted(list(missing_from_website)),
-                    'missing_from_config': sorted(list(missing_from_config)),
-                    'sample_entries': sample_entries,
-                    'config_map_sample': dict(list(config_map.items())[:10])
-                })
-        
-        return jsonify({'error': 'Login failed'})
-        
-    except Exception as e:
-        return jsonify({'error': str(e)})
-
-
 def run_dashboard(host='0.0.0.0', port=5000, debug=False):
     """Run the dashboard server"""
     print("🌐 Starting Enhanced Chilicon Dashboard...")
@@ -2903,4 +2714,4 @@ def run_dashboard(host='0.0.0.0', port=5000, debug=False):
 
 
 if __name__ == "__main__":
-    run_dashboard(port=5002, debug=False)
+    run_dashboard(port=5001, debug=False)

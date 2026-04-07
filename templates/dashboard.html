@@ -936,13 +936,24 @@
         }
         
         function updateInverterAnalysis() {
-            fetch('/api/inverters')
-                .then(response => response.json())
-                .then(data => {
+            Promise.all([
+                fetch('/api/inverters').then(r => r.json()),
+                fetch('/api/admin/inverters').then(r => r.json())
+            ])
+                .then(([data, adminData]) => {
                     const container = document.getElementById('inverter-analysis');
                     const stats = data.detailed_inverter_stats || [];
+
+                    // Build set of serials currently reporting
+                    const reportingSerials = new Set(stats.map(s => s.serial));
+
+                    // Build list of configured serials not in the reporting set
+                    const configuredInverters = adminData.inverters || [];
+                    const missingInverters = configuredInverters.filter(inv =>
+                        !inv.serial.startsWith('TEMP_') && !reportingSerials.has(inv.serial)
+                    );
                     
-                    if (stats.length === 0) {
+                    if (stats.length === 0 && missingInverters.length === 0) {
                         container.innerHTML = '<div class="loading">No detailed analysis data available</div>';
                         return;
                     }
@@ -999,15 +1010,15 @@
                     
                     html += '</div></div>';
                     
-                    // Problem inverters
+                    // Problem inverters (zero/low output among those reporting)
                     const problemInverters = stats.filter(s => s.current_power === 0 || s.avg_positive_power < 50);
-                    if (problemInverters.length > 0) {
+                    if (problemInverters.length > 0 || missingInverters.length > 0) {
                         html += `
                             <div class="analysis-section">
                                 <h4 class="problem-inverters">⚠️ Problem Inverters</h4>
                                 <div class="top-performers">
                         `;
-                        
+
                         problemInverters.forEach(stat => {
                             const status = stat.current_power === 0 ? 'OFFLINE' : 'LOW OUTPUT';
                             html += `
@@ -1018,13 +1029,22 @@
                                 </div>
                             `;
                         });
-                        
-                        html += '</div></div>';
+
+                        missingInverters.forEach(inv => {
+                            const arrayLabel = inv.array ? ` (${inv.array})` : '';
+                            html += `
+                                <div class="problem-item">
+                                    <span class="performer-serial">${inv.serial}${arrayLabel}</span>
+                                    <span style="color: #dc3545; font-weight: bold;">NOT REPORTING</span>
+                                    <span class="performer-power">—</span>
+                                </div>
+                            `;
+                        });
                     } else {
                         html += `
                             <div class="analysis-section">
                                 <h4>✅ System Status</h4>
-                                <p style="color: #28a745; font-weight: bold;">All inverters performing normally!</p>
+                                <p style="color: #28a745; font-weight: bold;">All ${totalInverters} inverters performing normally!</p>
                             </div>
                         `;
                     }
