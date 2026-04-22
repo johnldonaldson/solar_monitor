@@ -58,6 +58,7 @@ class SimpleWeatherMonitor:
             pressure = self._extract_pressure(html)
             uv_index = self._extract_uv_index(html)
             uv_description = self._extract_uv_description(html)
+            condition_phrase = self._extract_condition_phrase(html)
 
             data = {
                 'temp':             temp,
@@ -71,6 +72,7 @@ class SimpleWeatherMonitor:
                 'pressure':         pressure,
                 'uv_index':         uv_index,
                 'uv_description':   uv_description,
+                'condition_phrase': condition_phrase,
                 'observation_time': obs_time,
                 'timestamp':        datetime.now().isoformat(),
             }
@@ -170,6 +172,14 @@ class SimpleWeatherMonitor:
             r'"uvDescription":"([^"]+)"',
         ))
 
+    def _extract_condition_phrase(self, html):
+        """Extract current sky/conditions phrase."""
+        return self._extract_text(html, (
+            r'"cloudCoverPhrase":"([^"]+)"',
+            r'"wxPhraseLong":"([^"]+)"',
+            r'"wxPhraseMedium":"([^"]+)"',
+        ))
+
     def _extract_float(self, html, patterns):
         """Extract first float value using multiple patterns"""
         for pattern in patterns:
@@ -239,9 +249,12 @@ class SimpleWeatherMonitor:
             reasons.append(f"Very high humidity: {humidity}%")
 
         should_suspend = is_raining
+        condition_phrase = data.get('condition_phrase')
 
         if is_raining:
             summary = ', '.join(reasons)
+        elif condition_phrase:
+            summary = condition_phrase
         else:
             summary = 'Dry right now'
 
@@ -363,6 +376,7 @@ class SimpleWeatherMonitor:
             'pressure':              None,
             'uv_index':              None,
             'uv_description':        None,
+            'condition_phrase':      None,
             'observation_time':      None,
             'timestamp':             datetime.now().isoformat(),
         }
