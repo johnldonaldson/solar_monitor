@@ -23,6 +23,25 @@ from inverter_alert_manager import InverterAlertManager, calculate_sunset_time
 from intelligent_inverter_timing import create_timing_intelligence_integration
 
 app = Flask(__name__)
+APP_DIR = Path(__file__).resolve().parent
+REPO_DIR = APP_DIR.parent
+
+
+def resolve_existing_path(filename):
+    """Return the first existing path for a data or config file."""
+    for base_dir in (Path.cwd(), APP_DIR, REPO_DIR):
+        candidate = base_dir / filename
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def resolve_path_for_write(filename, default_dir):
+    """Write alongside an existing file when present, else use default_dir."""
+    existing = resolve_existing_path(filename)
+    if existing is not None:
+        return existing
+    return default_dir / filename
 
 # --- Configuration Constants ---
 CHILICON_USERNAME = "johnldonaldson@gmail.com"
@@ -52,8 +71,10 @@ class EnhancedDashboard:
             'energy_today_kwh': 0,
             'lifetime_energy_mwh': 0,
             'active_inverters': 0,
+            'active_inverter_note': '',
             'total_inverters': DEFAULT_TOTAL_INVERTERS,
-            'health_status': 'Unknown',
+            'health_status': 'Checking...',
+            'operating_mode': 'unknown',
             'alerts': [],
             'individual_inverters': [],
             'is_online': False,
@@ -63,7 +84,7 @@ class EnhancedDashboard:
         
         # Historical data for charts
         self.power_history = []
-        self.power_history_file = 'power_history_cache.json'
+        self.power_history_file = APP_DIR / 'power_history_cache.json'
         
         # Load existing power history
         self._load_power_history()
@@ -97,7 +118,7 @@ class EnhancedDashboard:
         self.daily_report_history = []
 
         # Rolling inverter production history (7-day retention)
-        self.production_history_file = Path('inverter_production_history.json')
+        self.production_history_file = APP_DIR / 'inverter_production_history.json'
         self.production_history = self._load_production_history()
         self.current_data['recent_production_history'] = (
             self.production_history[-7:]
@@ -126,7 +147,7 @@ class EnhancedDashboard:
     def _save_inverter_config(self, config):
         """Save inverter configuration to JSON file"""
         try:
-            config_file = 'inverter_config.json'
+            config_file = resolve_path_for_write('inverter_config.json', APP_DIR)
             config['last_updated'] = datetime.now().isoformat()
             
             with open(config_file, 'w') as f:
@@ -405,8 +426,8 @@ class EnhancedDashboard:
     def get_inverter_config(self):
         """Get full inverter configuration including array assignments (cached)."""
         try:
-            config_file = 'inverter_config.json'
-            if not os.path.exists(config_file):
+            config_file = resolve_existing_path('inverter_config.json')
+            if config_file is None:
                 return {'inverters': {}, 'arrays': {}}
 
             mtime = os.path.getmtime(config_file)
@@ -423,6 +444,31 @@ class EnhancedDashboard:
         except Exception as e:
             print(f"❌ Error loading inverter config: {e}")
             return {'inverters': {}, 'arrays': {}}
+
+    def _is_outside_production_window(self, current_time=None):
+        """Return True when solar production is not expected."""
+        current_time = current_time or datetime.now()
+        sunrise_hour = 7
+        sunrise = current_time.replace(
+            hour=sunrise_hour, minute=0, second=0, microsecond=0
+        )
+        sunset = calculate_sunset_time()
+        sunset_cutoff = sunset + timedelta(minutes=self.sunset_buffer_minutes)
+        return current_time < sunrise or current_time >= sunset_cutoff
+
+    def _apply_standby_status(self):
+        """Mark the system as idle outside expected production hours."""
+        self.current_data['health_status'] = '🌙 STANDBY'
+        self.current_data['operating_mode'] = 'standby'
+        self.current_data['active_inverter_note'] = 'sleeping'
+        self.current_data['alerts'] = []
+
+    def _apply_unknown_status(self):
+        """Mark status as unavailable when inverter detail data is missing."""
+        self.current_data['health_status'] = '⚪ Data unavailable'
+        self.current_data['operating_mode'] = 'unknown'
+        self.current_data['active_inverter_note'] = 'awaiting data'
+        self.current_data['alerts'] = []
     
     def background_update(self):
         """Background thread to update data every 15 minutes ONLY with debug logging"""
@@ -652,7 +698,8 @@ class EnhancedDashboard:
             low_power_threshold = 0.1  # 100W threshold
             
             for reading in recent_readings:
-                if reading.get('power_kw', 0) > low_power_threshold:
+                power_kw = reading.get('power', reading.get('power_kw', 0))
+                if power_kw > low_power_threshold:
                     return False  # Still generating significant power
             
             print(f"📉 Generation stopped - last 3 readings below {low_power_threshold}kW")
@@ -948,6 +995,9 @@ Next report will be sent tomorrow after sunset (~{(sunset_time + timedelta(days=
                     for i, stats in enumerate(detailed_stats):
                         serial = stats['serial']
                         current_power = stats['current_power']
+                        current_power_w = stats.get(
+                            'current_power_w', current_power * 1000
+                        )
                         
                         # Update daily peak tracking for this inverter
                         self._update_daily_peak(serial, current_power)
@@ -959,8 +1009,8 @@ Next report will be sent tomorrow after sunset (~{(sunset_time + timedelta(days=
                         converted_inverters.append({
                             'position': i,
                             'serial': serial,
-                            'power_w': current_power,  # Keep in kW for display
-                            'power': current_power,    # Keep in kW
+                            'power_w': current_power_w,
+                            'power': current_power,
                             'status': 'active' if current_power > POWER_THRESHOLD_KW else 'inactive',
                             'timestamp': datetime.now().isoformat(),
                             'max_power_today': stats.get('max_power', current_power),
@@ -978,32 +1028,43 @@ Next report will be sent tomorrow after sunset (~{(sunset_time + timedelta(days=
                     self.current_data['total_inverters'] = DEFAULT_TOTAL_INVERTERS
                     print(f"✅ Updated individual inverters: {active_count}/{DEFAULT_TOTAL_INVERTERS} active")
 
-                    # Derive health status directly from AJAX data
-                    activity_rate = active_count / DEFAULT_TOTAL_INVERTERS
-                    avg_active_power = (
-                        sum(s['current_power'] for s in detailed_stats if s['current_power'] > POWER_THRESHOLD_KW)
-                        / active_count if active_count else 0
-                    )
-                    underperforming = len([
-                        s for s in detailed_stats
-                        if POWER_THRESHOLD_KW < s['current_power'] < avg_active_power * 0.7
-                    ])
-                    not_active = DEFAULT_TOTAL_INVERTERS - active_count
-                    health_issues = []
-                    if activity_rate >= 0.95 and underperforming == 0:
-                        health_status = "🟢 EXCELLENT"
-                    elif activity_rate >= 0.85:
-                        health_status = "🟡 GOOD"
-                    elif activity_rate >= 0.70:
-                        health_status = "🔶 FAIR"
+                    if active_count == 0 and self._is_outside_production_window():
+                        self._apply_standby_status()
                     else:
-                        health_status = "🔴 POOR"
-                    if not_active > 0:
-                        health_issues.append(f"{not_active} inverter(s) not active")
-                    if underperforming > 0:
-                        health_issues.append(f"{underperforming} underperforming inverter(s)")
-                    self.current_data['health_status'] = health_status
-                    self.current_data['alerts'] = health_issues
+                        # Derive health status directly from AJAX data
+                        activity_rate = active_count / DEFAULT_TOTAL_INVERTERS
+                        avg_active_power = (
+                            sum(
+                                s['current_power'] for s in detailed_stats
+                                if s['current_power'] > POWER_THRESHOLD_KW
+                            ) / active_count if active_count else 0
+                        )
+                        underperforming = len([
+                            s for s in detailed_stats
+                            if POWER_THRESHOLD_KW < s['current_power'] < avg_active_power * 0.7
+                        ])
+                        not_active = DEFAULT_TOTAL_INVERTERS - active_count
+                        health_issues = []
+                        if activity_rate >= 0.95 and underperforming == 0:
+                            health_status = "🟢 EXCELLENT"
+                        elif activity_rate >= 0.85:
+                            health_status = "🟡 GOOD"
+                        elif activity_rate >= 0.70:
+                            health_status = "🔶 FAIR"
+                        else:
+                            health_status = "🔴 POOR"
+                        if not_active > 0:
+                            health_issues.append(
+                                f"{not_active} inverter(s) not active"
+                            )
+                        if underperforming > 0:
+                            health_issues.append(
+                                f"{underperforming} underperforming inverter(s)"
+                            )
+                        self.current_data['health_status'] = health_status
+                        self.current_data['operating_mode'] = 'production'
+                        self.current_data['active_inverter_note'] = ''
+                        self.current_data['alerts'] = health_issues
                     
                     # *** INTELLIGENT TIMING ANALYSIS ***
                     # Analyze timing patterns and learn from inverter behavior
@@ -1051,6 +1112,15 @@ Next report will be sent tomorrow after sunset (~{(sunset_time + timedelta(days=
                         print(f"❌ Alert check failed: {e}")
                 else:
                     print("⚠️ Could not fetch detailed inverter analysis")
+                    self.current_data['total_inverters'] = DEFAULT_TOTAL_INVERTERS
+                    if (
+                        self.current_data.get('power_kw', 0) < LOW_POWER_THRESHOLD_KW
+                        and self._is_outside_production_window()
+                    ):
+                        self.current_data['active_inverters'] = 0
+                        self._apply_standby_status()
+                    else:
+                        self._apply_unknown_status()
                 
                 return True
             else:
@@ -1169,13 +1239,14 @@ Next report will be sent tomorrow after sunset (~{(sunset_time + timedelta(days=
                     print(f"⚠️ Skipping unknown inverter ID {inverter_id} (not configured)")
                     continue
                 
-                # AJAX endpoint returns power values in watts directly (250W panels)
-                power_watts = float(power_data['power_kw'])  # Already in watts, not kW
+                # AJAX endpoint returns power values in watts.
+                power_watts = float(power_data['power_kw'])
+                power_kw = power_watts / 1000.0
                 
-                # Determine status based on POWER_THRESHOLD_KW (~10W) threshold
-                if power_watts > POWER_THRESHOLD_KW:
+                # Determine status using the shared backend threshold in kW.
+                if power_kw > POWER_THRESHOLD_KW:
                     status = 'active'
-                elif power_watts > 0:
+                elif power_kw > 0:
                     status = 'low_power'
                 else:
                     status = 'offline'
@@ -1184,7 +1255,7 @@ Next report will be sent tomorrow after sunset (~{(sunset_time + timedelta(days=
                 reading_time = datetime.fromtimestamp(power_data['timestamp']).strftime("%H:%M")
                 
                 # Update daily peak tracking for accurate timing intelligence
-                self._update_daily_peak(serial, power_watts)
+                self._update_daily_peak(serial, power_kw)
                 peak_info = self.daily_peaks.get(serial, {})
                 real_peak_time = peak_info.get('peak_time', reading_time)
                 
@@ -1192,12 +1263,16 @@ Next report will be sent tomorrow after sunset (~{(sunset_time + timedelta(days=
                     'inverter_id': inverter_id,
                     'serial': serial,
                     'total_readings': 1,
-                    'positive_readings': 1 if power_watts > 0 else 0,
-                    'max_power': power_watts,
-                    'min_power': power_watts,
-                    'avg_power': power_watts,
-                    'avg_positive_power': power_watts if power_watts > 0 else 0,
-                    'current_power': power_watts,
+                    'positive_readings': 1 if power_kw > 0 else 0,
+                    'max_power': power_kw,
+                    'min_power': power_kw,
+                    'avg_power': power_kw,
+                    'avg_positive_power': power_kw if power_kw > 0 else 0,
+                    'current_power': power_kw,
+                    'current_power_w': power_watts,
+                    'max_power_w': power_watts,
+                    'avg_power_w': power_watts,
+                    'avg_positive_power_w': power_watts if power_watts > 0 else 0,
                     'last_reading_time': reading_time,
                     'peak_time': real_peak_time,  # Real peak time for timing intelligence
                     'status': status,
@@ -1214,7 +1289,11 @@ Next report will be sent tomorrow after sunset (~{(sunset_time + timedelta(days=
             
             # Log some sample data for verification
             for i, stats in enumerate(inverter_stats[:3]):  # Show first 3
-                print(f"   📊 {stats['serial']}: {stats['current_power']:.1f}W ({stats['status']})")
+                print(
+                    f"   📊 {stats['serial']}: "
+                    f"{stats['current_power_w']:.1f}W "
+                    f"({stats['current_power']:.3f}kW, {stats['status']})"
+                )
             
             return inverter_stats
             
@@ -2547,6 +2626,10 @@ def api_current():
                     'summary',
                     'Weather data unavailable'
                 ),
+                'condition_detail': weather_status.get(
+                    'condition_detail',
+                    'Weather data unavailable'
+                ),
                 'is_raining': is_raining,
                 'should_suspend_alerts': alerts_suspended,
                 'temperature_f': weather_data.get('temp'),
@@ -2554,11 +2637,18 @@ def api_current():
                 'precip_rate_in_hr': weather_data.get('precip_rate'),
                 'precip_total_in': weather_data.get('precip_total'),
                 'solar_radiation_w_m2': weather_data.get('solar_radiation'),
+                'wind_speed_mph': weather_data.get('wind_speed'),
+                'wind_gust_mph': weather_data.get('wind_gust'),
+                'wind_direction': weather_data.get('wind_direction'),
+                'pressure_in': weather_data.get('pressure'),
+                'uv_index': weather_data.get('uv_index'),
+                'uv_description': weather_data.get('uv_description'),
                 'observation_time': weather_data.get('observation_time'),
                 'source': weather_data.get('source'),
                 'cache_timestamp': weather_data.get('timestamp'),
-                'status_label': (
-                    'Rain detected' if is_raining else 'No rain detected'
+                'status_label': weather_status.get(
+                    'summary',
+                    'Weather data unavailable'
                 )
             }
         except Exception as error:

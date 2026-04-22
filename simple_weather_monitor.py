@@ -43,15 +43,21 @@ class SimpleWeatherMonitor:
                 humidity     = obs.get('humidity')
                 precip_rate  = obs.get('precip_rate')
                 precip_total = obs.get('precip_total')
+                solar        = obs.get('solar_radiation')
                 obs_time     = obs.get('observation_time')
             else:
                 temp         = self._extract_temp(html)
                 humidity     = self._extract_humidity(html)
                 precip_rate  = self._extract_precip_rate(html)
                 precip_total = self._extract_precip_total(html)
+                solar        = self._extract_solar_radiation(html)
                 obs_time     = datetime.now().isoformat()
-
-            solar = self._extract_solar_radiation(html)
+            wind_speed = self._extract_wind_speed(html)
+            wind_gust = self._extract_wind_gust(html)
+            wind_direction = self._extract_wind_direction(html)
+            pressure = self._extract_pressure(html)
+            uv_index = self._extract_uv_index(html)
+            uv_description = self._extract_uv_description(html)
 
             data = {
                 'temp':             temp,
@@ -59,6 +65,12 @@ class SimpleWeatherMonitor:
                 'precip_rate':      precip_rate,
                 'precip_total':     precip_total,
                 'solar_radiation':  solar,
+                'wind_speed':       wind_speed,
+                'wind_gust':        wind_gust,
+                'wind_direction':   wind_direction,
+                'pressure':         pressure,
+                'uv_index':         uv_index,
+                'uv_description':   uv_description,
                 'observation_time': obs_time,
                 'timestamp':        datetime.now().isoformat(),
             }
@@ -109,12 +121,53 @@ class SimpleWeatherMonitor:
         ))
 
     def _extract_solar_radiation(self, html):
-        """Extract solar radiation (W/m^2)"""
-        return self._extract_float_max(html, (
+        """Extract solar radiation (W/m^2) from current-only fields."""
+        return self._extract_float(html, (
             r'"solarRadiation":([0-9.]+)',
-            r'"solarRadiationHigh":([0-9.]+)',
-            r'SOLAR\s+RADIATION\s+([0-9.]+)\s*w/m²',
-            r'SOLAR\s+RADIATION\s+([0-9.]+)\s*w/m2',
+            r'SOLAR\s+RADIATION\s+CURRENT\s+([0-9.]+)\s*watts/m²',
+            r'SOLAR\s+RADIATION\s+CURRENT\s+([0-9.]+)\s*watts/m2',
+        ))
+
+    def _extract_wind_speed(self, html):
+        """Extract wind speed (mph)"""
+        return self._extract_float(html, (
+            r'"windSpeed":([0-9.]+)',
+            r'WIND\s*&\s*GUST\s+([0-9.]+)\s*/\s*[0-9.]+\s*mph',
+        ))
+
+    def _extract_wind_gust(self, html):
+        """Extract wind gust (mph)"""
+        return self._extract_float(html, (
+            r'"windGust":([0-9.]+)',
+            r'WIND\s*&\s*GUST\s+[0-9.]+\s*/\s*([0-9.]+)\s*mph',
+        ))
+
+    def _extract_wind_direction(self, html):
+        """Extract wind direction"""
+        return self._extract_text(html, (
+            r'"windDirectionCardinal":"([^"]+)"',
+            r'WIND\s+FROM\s+([A-Z]+)',
+        ))
+
+    def _extract_pressure(self, html):
+        """Extract pressure (inHg)"""
+        return self._extract_float(html, (
+            r'"pressureAltimeter":([0-9.]+)',
+            r'"pressureMeanSeaLevel":([0-9.]+)',
+            r'PRESSURE\s+([0-9.]+)\s*in',
+        ))
+
+    def _extract_uv_index(self, html):
+        """Extract UV index"""
+        return self._extract_float(html, (
+            r'"uvIndex":([0-9.]+)',
+            r'CURRENT\s+UV\s+([0-9.]+)',
+        ))
+
+    def _extract_uv_description(self, html):
+        """Extract UV description"""
+        return self._extract_text(html, (
+            r'"uvDescription":"([^"]+)"',
         ))
 
     def _extract_float(self, html, patterns):
@@ -152,6 +205,19 @@ class SimpleWeatherMonitor:
                     continue
         return 0
 
+    def _extract_text(self, html, patterns):
+        """Extract first text value using multiple patterns"""
+        for pattern in patterns:
+            m = re.search(pattern, html, re.IGNORECASE)
+            if m:
+                try:
+                    value = m.group(1).strip()
+                except (ValueError, IndexError, AttributeError):
+                    continue
+                if value:
+                    return value
+        return None
+
     # ------------------------------------------------------------------
     # Processing
     # ------------------------------------------------------------------
@@ -174,11 +240,50 @@ class SimpleWeatherMonitor:
 
         should_suspend = is_raining
 
+        if is_raining:
+            summary = ', '.join(reasons)
+        else:
+            summary = 'Dry right now'
+
+        detail_parts = []
+        if humidity:
+            detail_parts.append(f"Humidity {humidity:.0f}%")
+
+        wind_direction = data.get('wind_direction')
+        wind_speed = data.get('wind_speed')
+        if wind_speed:
+            wind_text = f"Wind {wind_speed:.1f} mph"
+            if wind_direction:
+                wind_text += f" from {wind_direction}"
+            detail_parts.append(wind_text)
+
+        pressure = data.get('pressure')
+        if pressure:
+            detail_parts.append(f"Pressure {pressure:.2f} in")
+
+        uv_index = data.get('uv_index')
+        uv_description = data.get('uv_description')
+        if uv_index is not None and uv_index != 0:
+            uv_text = f"UV {uv_index:.0f}"
+            if uv_description:
+                uv_text += f" ({uv_description})"
+            detail_parts.append(uv_text)
+        elif uv_description:
+            detail_parts.append(f"UV {uv_description}")
+
+        if not is_raining and precip_rate == 0 and precip_total == 0:
+            detail_parts.append('No precipitation at the station')
+
+        if reasons:
+            detail_parts = reasons + detail_parts
+
+        condition_detail = ' | '.join(detail_parts) if detail_parts else summary
+
         return {
             'is_raining':           is_raining,
             'should_suspend_alerts': should_suspend,
-            'summary':              ', '.join(reasons) if reasons else 'No rain detected',
-            'condition_detail':     ', '.join(reasons) if reasons else 'Clear conditions',
+            'summary':              summary,
+            'condition_detail':     condition_detail,
         }
 
     # ------------------------------------------------------------------
@@ -234,6 +339,7 @@ class SimpleWeatherMonitor:
                 'humidity':         obs.get('humidityAvg') or obs.get('humidity'),
                 'precip_rate':      imperial.get('precipRate'),
                 'precip_total':     imperial.get('precipTotal'),
+                'solar_radiation':  obs.get('solarRadiation') or obs.get('solarRadiationHigh'),
                 'observation_time': obs.get('obsTimeLocal'),
             }
         except json.JSONDecodeError:
@@ -251,6 +357,12 @@ class SimpleWeatherMonitor:
             'precip_rate':           None,
             'precip_total':          None,
             'solar_radiation':       None,
+            'wind_speed':            None,
+            'wind_gust':             None,
+            'wind_direction':        None,
+            'pressure':              None,
+            'uv_index':              None,
+            'uv_description':        None,
             'observation_time':      None,
             'timestamp':             datetime.now().isoformat(),
         }

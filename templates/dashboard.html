@@ -249,6 +249,11 @@
             background-color: #fff3cd;
             color: #856404;
         }
+
+        .health-unknown {
+            background-color: #e5e7eb;
+            color: #374151;
+        }
         
         .health-error {
             background-color: #f8d7da;
@@ -443,7 +448,7 @@
                     System Health
                 </div>
                 <div id="health-status" class="health-status health-unknown">Checking...</div>
-                <div><strong>Active Inverters:</strong> <span id="active-inverters">0</span>/<span id="total-inverters">25</span></div>
+                <div><strong>Active Inverters:</strong> <span id="active-inverters">0</span>/<span id="total-inverters">25</span><span id="active-inverter-note"></span></div>
                 <div class="progress-bar">
                     <div class="progress-fill" id="inverter-progress" style="width: 0%"></div>
                 </div>
@@ -456,10 +461,11 @@
                     Weather & Alerts
                 </div>
                 <div id="weather-summary" class="weather-summary">Loading weather...</div>
-                <div id="weather-line" class="weather-line" style="font-size: 0.9em; color: #444; margin-bottom: 8px;">&nbsp;</div>
                 <div class="weather-metrics">
                     <div><span class="weather-metric-label">Temp:</span> <span id="weather-temp">--</span></div>
                     <div><span class="weather-metric-label">Humidity:</span> <span id="weather-humidity">--</span></div>
+                    <div><span class="weather-metric-label">Wind:</span> <span id="weather-wind">--</span></div>
+                    <div><span class="weather-metric-label">Pressure:</span> <span id="weather-pressure">--</span></div>
                     <div><span class="weather-metric-label">Solar:</span> <span id="weather-radiation">--</span></div>
                     <div><span class="weather-metric-label">Precip Rate:</span> <span id="weather-precip-rate">--</span></div>
                     <div><span class="weather-metric-label">Daily Rain:</span> <span id="weather-precip-total">--</span></div>
@@ -650,27 +656,22 @@
         function updateSystemHealth(data) {
             const healthElement = document.getElementById('health-status');
             const status = data.health_status || 'Unknown';
+            const normalizedStatus = status.toLowerCase();
             
             // Remove old classes
             healthElement.className = 'health-status';
             
             // Add appropriate class
-            switch(status.toLowerCase()) {
-                case 'excellent':
+            if (normalizedStatus.includes('excellent')) {
                     healthElement.classList.add('health-excellent');
-                    break;
-                case 'good':
+            } else if (normalizedStatus.includes('good') || normalizedStatus.includes('standby')) {
                     healthElement.classList.add('health-good');
-                    break;
-                case 'warning':
+            } else if (normalizedStatus.includes('fair') || normalizedStatus.includes('warning')) {
                     healthElement.classList.add('health-warning');
-                    break;
-                case 'error':
-                case 'critical':
+            } else if (normalizedStatus.includes('poor') || normalizedStatus.includes('error') || normalizedStatus.includes('critical')) {
                     healthElement.classList.add('health-error');
-                    break;
-                default:
-                    healthElement.classList.add('health-warning');
+            } else {
+                    healthElement.classList.add('health-unknown');
             }
             
             healthElement.textContent = status;
@@ -683,6 +684,11 @@
             
             document.getElementById('active-inverters').textContent = active;
             document.getElementById('total-inverters').textContent = total;
+            const activeNoteElement = document.getElementById('active-inverter-note');
+            if (activeNoteElement) {
+                const note = data.active_inverter_note || '';
+                activeNoteElement.textContent = note ? ` (${note})` : '';
+            }
             
             // Update inverter progress
             const inverterProgress = total > 0 ? (active / total) * 100 : 0;
@@ -692,8 +698,7 @@
         function updateWeather(data) {
             const weatherStatus = data.weather_status || {};
             const summaryElement = document.getElementById('weather-summary');
-            const lineElement = document.getElementById('weather-line');
-            if (!summaryElement || !lineElement) {
+            if (!summaryElement) {
                 return;
             }
 
@@ -708,24 +713,7 @@
             };
 
             const isRaining = Boolean(weatherStatus.is_raining);
-            summaryElement.textContent = isRaining ? 'Rain detected' : 'No rain detected';
-
-            if (data.alerts_suspended_due_to_weather) {
-                lineElement.textContent = '';
-            } else if (weatherStatus.summary) {
-                const colonIndex = weatherStatus.summary.indexOf(':');
-                let detail = weatherStatus.summary;
-                if (colonIndex > -1) {
-                    detail = weatherStatus.summary.slice(colonIndex + 1).trim();
-                }
-                const commaIndex = detail.indexOf(',');
-                if (commaIndex > -1) {
-                    detail = detail.slice(0, commaIndex).trim();
-                }
-                lineElement.textContent = detail ? `Condition detail: ${detail}` : '';
-            } else {
-                lineElement.textContent = '';
-            }
+            summaryElement.textContent = weatherStatus.status_label || weatherStatus.summary || 'Weather data unavailable';
 
             const tempElement = document.getElementById('weather-temp');
             if (tempElement) {
@@ -742,6 +730,28 @@
                     weatherStatus.humidity_percent,
                     0,
                     '%'
+                );
+            }
+
+            const windElement = document.getElementById('weather-wind');
+            if (windElement) {
+                const windSpeed = weatherStatus.wind_speed_mph;
+                const windDirection = weatherStatus.wind_direction;
+                if (typeof windSpeed === 'number' && !Number.isNaN(windSpeed)) {
+                    windElement.textContent = windDirection
+                        ? `${windSpeed.toFixed(1)} mph ${windDirection}`
+                        : `${windSpeed.toFixed(1)} mph`;
+                } else {
+                    windElement.textContent = '--';
+                }
+            }
+
+            const pressureElement = document.getElementById('weather-pressure');
+            if (pressureElement) {
+                pressureElement.textContent = formatValue(
+                    weatherStatus.pressure_in,
+                    2,
+                    ' in'
                 );
             }
 
@@ -823,8 +833,10 @@
                     div.className = 'inverter';
                     
                     // Power is in watts for individual inverters (250W panels)
-                    const powerW = stats.current_power || 0;
-                    const isActive = stats.current_power > 0.01; // Active if > 0.01W (matches backend)
+                    const powerW = stats.current_power_w ?? ((stats.current_power || 0) * 1000);
+                    const maxPowerW = stats.max_power_w ?? ((stats.max_power || 0) * 1000);
+                    const avgPowerW = stats.avg_positive_power_w ?? ((stats.avg_positive_power || 0) * 1000);
+                    const isActive = (stats.current_power || 0) > 0.01;
                     
                     div.classList.add(isActive ? 'active' : 'inactive');
                     
@@ -835,8 +847,8 @@
                     
                     div.title = `Serial: ${stats.serial}
                     Current: ${powerW.toFixed(1)}W
-                    Max Today: ${stats.max_power.toFixed(1)}W
-                    Avg Power: ${stats.avg_positive_power.toFixed(1)}W
+                    Max Today: ${maxPowerW.toFixed(1)}W
+                    Avg Power: ${avgPowerW.toFixed(1)}W
                     Status: ${stats.status}
                     Peak Time: ${stats.peak_time}`;
                     
@@ -961,7 +973,7 @@
                     // Calculate system overview
                     const totalCurrent = stats.reduce((sum, s) => sum + s.current_power, 0);
                     const totalMax = stats.reduce((sum, s) => sum + s.max_power, 0);
-                    const activeCount = stats.filter(s => s.current_power > 10).length;
+                    const activeCount = stats.filter(s => s.current_power > 0.01).length;
                     const totalInverters = 25; // Known system total, not just detected
                     const efficiency = (activeCount / totalInverters * 100).toFixed(1);
                     
@@ -999,11 +1011,12 @@
                     `;
                     
                     topPerformers.forEach((stat, index) => {
+                        const currentPowerW = stat.current_power_w ?? (stat.current_power * 1000);
                         html += `
                             <div class="performer-item">
                                 <span class="performer-rank">#${index + 1}</span>
                                 <span class="performer-serial">${stat.serial}</span>
-                                <span class="performer-power">${stat.current_power.toFixed(1)}W</span>
+                                <span class="performer-power">${currentPowerW.toFixed(1)}W</span>
                             </div>
                         `;
                     });
@@ -1011,7 +1024,7 @@
                     html += '</div></div>';
                     
                     // Problem inverters (zero/low output among those reporting)
-                    const problemInverters = stats.filter(s => s.current_power === 0 || s.avg_positive_power < 50);
+                    const problemInverters = stats.filter(s => s.current_power === 0 || s.avg_positive_power < 0.05);
                     if (problemInverters.length > 0 || missingInverters.length > 0) {
                         html += `
                             <div class="analysis-section">
@@ -1020,12 +1033,13 @@
                         `;
 
                         problemInverters.forEach(stat => {
+                            const currentPowerW = stat.current_power_w ?? (stat.current_power * 1000);
                             const status = stat.current_power === 0 ? 'OFFLINE' : 'LOW OUTPUT';
                             html += `
                                 <div class="problem-item">
                                     <span class="performer-serial">${stat.serial}</span>
                                     <span style="color: #dc3545; font-weight: bold;">${status}</span>
-                                    <span class="performer-power">${stat.current_power.toFixed(1)}W</span>
+                                    <span class="performer-power">${currentPowerW.toFixed(1)}W</span>
                                 </div>
                             `;
                         });
