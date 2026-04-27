@@ -1,5 +1,11 @@
 {
+  "low_power_threshold": 0.5,
+  "offline_alert_minutes": 30,
+  "daily_report_enabled": true,
   "inverter_alerts_enabled": true,
+  "min_active_inverters": 20,
+  "max_offline_inverters": 3,
+  "sunset_buffer_minutes": 30,
   "email_alerts_enabled": false,
   "imessage_alerts_enabled": false
 }

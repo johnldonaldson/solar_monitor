@@ -1,6 +1,6 @@
 {
   "description": "Active inverter configuration for solar array management and intelligent timing learning",
-  "last_updated": "2025-08-07T11:01:18.548646",
+  "last_updated": "2026-04-27T09:05:44.178006",
   "version": "1.0",
   "inverters": {
     "-1863319184": {
@@ -19,12 +19,6 @@
     "-1863319160": {
       "serial": "90F00188",
       "position": 3,
-      "array": "east",
-      "description": "East-facing array inverter"
-    },
-    "-1863319204": {
-      "serial": "90F0015C",
-      "position": 4,
       "array": "east",
       "description": "East-facing array inverter"
     },
@@ -157,6 +151,14 @@
       "position": 26,
       "array": "south",
       "description": "South-facing array inverter (new replacement)"
+    },
+    "-2123360837": {
+      "serial": "817015BB",
+      "position": 27,
+      "array": "east",
+      "description": "Replacement for 90F0015C",
+      "added_date": "2026-04-27T08:55:37.663614",
+      "last_updated": "2026-04-27T09:08:00"
     }
   },
   "arrays": {

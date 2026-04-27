@@ -380,6 +380,13 @@
                     document.getElementById('next-sunset-time').textContent = 'Error loading info';
                     return;
                 }
+
+                if (!data.daily_report_enabled) {
+                    document.getElementById('next-sunset-time').textContent = 'Disabled in alert config';
+                    document.getElementById('next-sunset-time').title =
+                        `Today's sunset: ${data.today_sunset}, Current: ${data.current_time}`;
+                    return;
+                }
                 
                 const nextReportTime = data.next_report_time;
                 const nextReportDate = data.next_report_date;
@@ -468,12 +475,24 @@
             inverters.forEach(inverter => {
                 // Array assignment styling based on current array
                 const arrayStyle = `background: ${inverter.array_color}; color: white;`;
+                const statusStyle = inverter.status === 'awaiting_first_report'
+                    ? 'display: inline-block; margin-top: 4px; padding: 2px 6px; border-radius: 999px; background: #fff3cd; color: #8a6d3b; font-size: 11px; font-weight: bold;'
+                    : 'display: inline-block; margin-top: 4px; padding: 2px 6px; border-radius: 999px; background: #e8f5e9; color: #2e7d32; font-size: 11px; font-weight: bold;';
+                const learnedText = inverter.status === 'awaiting_first_report'
+                    ? 'Awaiting live detection'
+                    : `Learned: ${inverter.learned_orientation}`;
                 
                 html += `
                     <tr>
                         <td style="font-weight: bold;">${inverter.position}</td>
-                        <td style="font-family: monospace; font-size: 12px;">${inverter.id}</td>
-                        <td><strong>${inverter.serial}</strong></td>
+                        <td style="font-family: monospace; font-size: 12px;">
+                            ${inverter.id}
+                            <div style="${statusStyle}">${inverter.status_label}</div>
+                        </td>
+                        <td>
+                            <strong>${inverter.serial}</strong>
+                            ${inverter.is_temp ? '<div style="font-size: 11px; color: #8a6d3b; margin-top: 3px;">Temporary placeholder ID</div>' : ''}
+                        </td>
                         <td>
                             <select data-inverter-id="${inverter.id}" 
                                     onchange="updateInverterArrayByData(this)" 
@@ -484,7 +503,7 @@
                                 <option value="south" ${inverter.array === 'south' ? 'selected' : ''}>🔷 South Array</option>
                             </select>
                             <div style="font-size: 11px; color: #666; margin-top: 2px;">
-                                Learned: ${inverter.learned_orientation}
+                                ${learnedText}
                             </div>
                         </td>
                         <td style="font-size: 12px; color: #666;">${inverter.description}</td>
@@ -685,13 +704,13 @@
                 return;
             }
 
-            console.log('🔧 DEBUG: About to call API with:', { id: inverterId, reason: reason.trim() });
+            console.log('🔧 DEBUG: About to call API with:', { inverter_id: inverterId, reason: reason.trim() });
 
             fetch('/api/admin/inverters/remove', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({
-                    id: inverterId,  // Send ID as-is (string or number)
+                    inverter_id: inverterId,
                     reason: reason.trim()
                 })
             })

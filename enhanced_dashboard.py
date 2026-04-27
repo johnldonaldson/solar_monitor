@@ -43,6 +43,18 @@ def resolve_path_for_write(filename, default_dir):
         return existing
     return default_dir / filename
 
+
+def load_json_config(filename, default=None):
+    """Load JSON config from the resolved file path."""
+    config_path = resolve_existing_path(filename)
+    if config_path is None:
+        if default is None:
+            return None
+        return copy.deepcopy(default)
+
+    with open(config_path, 'r') as file_handle:
+        return json.load(file_handle)
+
 # --- Configuration Constants ---
 CHILICON_USERNAME = "johnldonaldson@gmail.com"
 CHILICON_PASSWORD = "P0pc0rn1"
@@ -162,6 +174,50 @@ class EnhancedDashboard:
         except Exception as e:
             print(f"❌ Error saving inverter config: {e}")
             return False
+
+    def _promote_temp_inverter_id(self, live_inverter_id, config=None):
+        """Replace a TEMP_* inverter entry with the real live inverter ID."""
+        config = config or self.get_inverter_config()
+        configured_inverters = config.get('inverters', {})
+
+        live_id_key = str(live_inverter_id)
+        if live_id_key in configured_inverters:
+            return configured_inverters[live_id_key]
+
+        try:
+            live_serial = f"{(int(live_inverter_id) + 2**32) % 2**32:08X}"
+        except (TypeError, ValueError):
+            return None
+
+        temp_key = None
+        temp_entry = None
+        for inverter_key, inverter_info in configured_inverters.items():
+            if not str(inverter_key).startswith('TEMP_'):
+                continue
+            if inverter_info.get('serial', '').upper() != live_serial:
+                continue
+            temp_key = inverter_key
+            temp_entry = dict(inverter_info)
+            break
+
+        if temp_entry is None:
+            return None
+
+        temp_entry.pop('temp_id', None)
+        temp_entry.pop('status', None)
+        temp_entry['discovered_from_temp_id'] = temp_key
+        temp_entry['last_updated'] = datetime.now().isoformat()
+        configured_inverters[live_id_key] = temp_entry
+        del configured_inverters[temp_key]
+
+        if self._save_inverter_config(config):
+            print(
+                f"✅ Promoted temp inverter {temp_key} to real ID {live_id_key} "
+                f"for serial {live_serial}"
+            )
+            return temp_entry
+
+        return None
     
     def _reset_daily_peaks_if_new_day(self):
         """Reset daily peak and production tracking when the date changes"""
@@ -644,44 +700,51 @@ class EnhancedDashboard:
         """Check if it's time to send the daily report (after sunset + buffer)"""
         try:
             # Check if daily reports are enabled in alert config
-            alert_config_file = 'alert_config.json'
-            if not os.path.exists(alert_config_file):
+            alert_config = load_json_config('alert_config.json', {})
+            if not alert_config:
+                print("⚠️ Daily report skipped: alert config not found")
                 return False
-                
-            with open(alert_config_file, 'r') as f:
-                alert_config = json.load(f)
-                
+
             if not alert_config.get('daily_report_enabled', False):
+                print("ℹ️ Daily report skipped: disabled in alert config")
                 return False
-            
+
             # Also check if email is configured
-            email_config_file = 'email_config.json'
-            if not os.path.exists(email_config_file):
+            email_config = load_json_config('email_config.json', {})
+            if not email_config:
+                print("⚠️ Daily report skipped: email config not found")
                 return False
-            
+
+            buffer_minutes = int(
+                alert_config.get(
+                    'sunset_buffer_minutes',
+                    self.sunset_buffer_minutes
+                )
+            )
+
             # Calculate sunset time
             sunset_time = calculate_sunset_time()
-            
+
             # Add buffer (wait after sunset)
-            report_time = sunset_time + timedelta(minutes=self.sunset_buffer_minutes)
-            
+            report_time = sunset_time + timedelta(minutes=buffer_minutes)
+
             current_time = datetime.now()
             today = current_time.date()
-            
+
             # Check if we haven't sent today's report yet
             if self.last_daily_report_date == today:
                 return False
-            
+
             # Check if it's after the report time
             if current_time < report_time:
                 return False
-            
+
             # Check if power generation has actually stopped (near zero for buffer period)
             if self._is_generation_stopped():
                 return True
-                
+
             return False
-            
+
         except Exception as e:
             print(f"❌ Error checking daily report timing: {e}")
             return False
@@ -822,12 +885,9 @@ This automated daily report is sent after sunset when solar generation stops.
 Next report will be sent tomorrow after sunset (~{(sunset_time + timedelta(days=1)).strftime('%H:%M')}).
 """
 
-            alert_config = {}
-            alert_config_path = Path('alert_config.json')
-            if alert_config_path.exists():
-                alert_config = json.loads(alert_config_path.read_text())
+            alert_config = load_json_config('alert_config.json', {})
 
-            email_enabled = alert_config.get('email_alerts_enabled', False)
+            email_enabled = alert_config.get('daily_report_enabled', False)
 
             report_record = {
                 'date': current_time.date().isoformat(),
@@ -876,27 +936,26 @@ Next report will be sent tomorrow after sunset (~{(sunset_time + timedelta(days=
                 print(f"❌ Failed to save daily report to disk: {file_error}")
 
             if email_enabled:
-                email_config_path = Path('email_config.json')
-                if not email_config_path.exists():
+                email_config = load_json_config('email_config.json', {})
+                if not email_config:
                     report_record['email_error'] = 'Email not configured'
                 else:
-                    config = json.loads(email_config_path.read_text())
                     try:
                         msg = MIMEText(report_body)
                         msg['Subject'] = (
                             f"🌇 End-of-Day Solar Report - {current_time.strftime('%m/%d/%Y')}"
                         )
-                        display_name = config.get('display_name', 'Solar Monitor')
-                        from_email = config['smtp_username']
+                        display_name = email_config.get('display_name', 'Solar Monitor')
+                        from_email = email_config['smtp_username']
                         msg['From'] = f"{display_name} <{from_email}>"
-                        msg['To'] = config['email']
+                        msg['To'] = email_config['email']
 
                         server = smtplib.SMTP(
-                            config['smtp_server'], int(config['smtp_port'])
+                            email_config['smtp_server'], int(email_config['smtp_port'])
                         )
                         server.starttls()
                         server.login(
-                            config['smtp_username'], config['smtp_password']
+                            email_config['smtp_username'], email_config['smtp_password']
                         )
                         server.send_message(msg)
                         server.quit()
@@ -906,7 +965,7 @@ Next report will be sent tomorrow after sunset (~{(sunset_time + timedelta(days=
                         report_record['email_error'] = str(email_error)
                         print(f"❌ Failed to send daily report email: {email_error}")
             else:
-                print("ℹ️ Email alerts disabled; daily report stored locally only")
+                print("ℹ️ Daily report email disabled; report stored locally only")
 
             self._store_daily_report_record(report_record)
             report_record['history_snapshot'] = (
@@ -918,7 +977,7 @@ Next report will be sent tomorrow after sunset (~{(sunset_time + timedelta(days=
             )
             response = {'success': success, 'report': report_record}
             if not email_enabled:
-                response['message'] = 'Email alerts disabled; report saved locally'
+                response['message'] = 'Daily report email disabled; report saved locally'
             elif not report_record['email_sent']:
                 response['message'] = report_record.get('email_error')
 
@@ -1235,9 +1294,19 @@ Next report will be sent tomorrow after sunset (~{(sunset_time + timedelta(days=
                         break
                 
                 if not serial:
-                    # Skip unknown inverters instead of creating phantom entries
-                    print(f"⚠️ Skipping unknown inverter ID {inverter_id} (not configured)")
-                    continue
+                    promoted_info = self._promote_temp_inverter_id(
+                        inverter_id,
+                        config=config
+                    )
+                    if promoted_info:
+                        serial = promoted_info.get('serial')
+                        array = promoted_info.get('array', 'unknown')
+                        position = promoted_info.get('position', 0)
+                        config = self.get_inverter_config()
+                    else:
+                        # Skip unknown inverters instead of creating phantom entries
+                        print(f"⚠️ Skipping unknown inverter ID {inverter_id} (not configured)")
+                        continue
                 
                 # AJAX endpoint returns power values in watts.
                 power_watts = float(power_data['power_kw'])
@@ -1483,26 +1552,19 @@ def admin():
     email_config = {}
     alert_config = {}
     imessage_config = {}
-    
+
     try:
-        if os.path.exists('email_config.json'):
-            with open('email_config.json', 'r') as f:
-                email_config = json.load(f)
+        email_config = load_json_config('email_config.json', {})
     except Exception as e:
         print(f"Warning: Could not load email_config.json: {e}")
-    
+
     try:
-        if os.path.exists('alert_config.json'):
-            with open('alert_config.json', 'r') as f:
-                alert_config = json.load(f)
+        alert_config = load_json_config('alert_config.json', {})
     except Exception as e:
         print(f"Warning: Could not load alert_config.json: {e}")
-    
-    # iMessage config (may not exist)
+
     try:
-        if os.path.exists('imessage_config.json'):
-            with open('imessage_config.json', 'r') as f:
-                imessage_config = json.load(f)
+        imessage_config = load_json_config('imessage_config.json', {})
     except Exception as e:
         print(f"Info: No imessage_config.json found: {e}")
     
@@ -1665,8 +1727,13 @@ def save_alert_config():
                 })
         
         # Save to alert_config.json
-        with open('alert_config.json', 'w') as f:
+        config_path = resolve_path_for_write('alert_config.json', APP_DIR)
+        with open(config_path, 'w') as f:
             json.dump(config_data, f, indent=2)
+
+        dashboard.sunset_buffer_minutes = int(
+            config_data.get('sunset_buffer_minutes', SUNSET_BUFFER_MINUTES)
+        )
         
         return jsonify({
             'success': True,
@@ -1686,7 +1753,8 @@ def save_email_config():
     try:
         config_data = request.get_json()
         
-        with open('email_config.json', 'w') as f:
+        config_path = resolve_path_for_write('email_config.json', REPO_DIR)
+        with open(config_path, 'w') as f:
             json.dump(config_data, f, indent=2)
         
         return jsonify({
@@ -1838,12 +1906,30 @@ def get_inverter_production_history():
 def get_sunset_info():
     """Get sunset information"""
     try:
+        alert_config = load_json_config('alert_config.json', {}) or {}
+        buffer_minutes = int(
+            alert_config.get('sunset_buffer_minutes', dashboard.sunset_buffer_minutes)
+        )
         sunset_time = calculate_sunset_time()
+        report_time = sunset_time + timedelta(minutes=buffer_minutes)
+        current_time = datetime.now()
+        today = current_time.date()
+
+        if dashboard.last_daily_report_date == today:
+            next_report_time = report_time + timedelta(days=1)
+        else:
+            next_report_time = report_time
         
         return jsonify({
             'success': True,
-            'sunset_time': sunset_time.strftime('%H:%M'),
-            'sunset_datetime': sunset_time.isoformat()
+            'daily_report_enabled': alert_config.get('daily_report_enabled', False),
+            'today_sunset': sunset_time.strftime('%H:%M'),
+            'today_report_time': report_time.strftime('%H:%M'),
+            'next_report_time': next_report_time.strftime('%H:%M'),
+            'next_report_date': next_report_time.date().isoformat(),
+            'current_time': current_time.strftime('%H:%M'),
+            'report_sent_today': dashboard.last_daily_report_date == today,
+            'buffer_minutes': buffer_minutes
         })
         
     except Exception as e:
@@ -1923,7 +2009,17 @@ def get_inverter_mapping():
                 'description': inverter_info.get('description', ''),
                 'learned_orientation': learned_orientation,
                 'reliability_score': reliability_score,
-                'status': 'configured'
+                'status': (
+                    'awaiting_first_report'
+                    if is_temp or inverter_info.get('status') == 'awaiting_discovery'
+                    else 'configured'
+                ),
+                'status_label': (
+                    'Awaiting first report'
+                    if is_temp or inverter_info.get('status') == 'awaiting_discovery'
+                    else 'Configured'
+                ),
+                'is_temp': is_temp
             })
         
         # Sort by position
@@ -2502,75 +2598,68 @@ def find_inverter_by_serial():
 def remove_inverter_mapping():
     """Remove an inverter ID mapping (for offline/replaced inverters)"""
     try:
-        data = request.get_json()
-        inverter_id = data.get('inverter_id')
+        data = request.get_json() or {}
+        raw_inverter_id = data.get('inverter_id', data.get('id'))
         reason = data.get('reason', 'Manual removal')
         
-        if not inverter_id:
+        if raw_inverter_id in (None, ''):
             return jsonify({
                 'success': False,
                 'error': 'Inverter ID is required'
             })
-        
+
+        config = dashboard.get_inverter_config()
+        configured_inverters = config.get('inverters', {})
+
+        candidate_keys = []
+        inverter_id = str(raw_inverter_id).strip()
+        if inverter_id:
+            candidate_keys.append(inverter_id)
+
         try:
-            inverter_id = int(inverter_id)
-        except ValueError:
+            candidate_keys.append(str(int(inverter_id)))
+        except (TypeError, ValueError):
+            pass
+
+        inverter_key = next(
+            (key for key in candidate_keys if key in configured_inverters),
+            None
+        )
+
+        if inverter_key is None:
             return jsonify({
                 'success': False,
-                'error': 'Inverter ID must be a valid integer'
+                'error': f'Inverter ID {raw_inverter_id} not found in configuration'
             })
-        
-        # Get current mapping to show what would be removed
-        current_mapping = {
-            -1863319184: '90F00170',  # Position 1
-            -1863319181: '90F00173',  # Position 2
-            -1863319160: '90F00188',  # Position 3
-            -1863319204: '90F0015C',  # Position 4
-            -1863319143: '90F00199',  # Position 6
-            -1863319173: '90F0017B',  # Position 7
-            -1863319193: '90F00167',  # Position 9
-            -1863319119: '90F001B1',  # Position 10
-            -1863319163: '90F00185',  # Position 11
-            -1863319114: '90F001B6',  # Position 12
-            -1863319168: '90F00180',  # Position 13
-            -1863319174: '90F0017A',  # Position 14
-            -1863319169: '90F0017F',  # Position 15
-            -1863319121: '90F001AF',  # Position 16
-            -1863319161: '90F00187',  # Position 17
-            -1863319170: '90F0017E',  # Position 18
-            -1863319179: '90F00175',  # Position 19
-            -1863319123: '90F001AD',  # Position 21
-            -1863319078: '90F001DA',  # Position 22
-            -1863319180: '90F00174',  # Position 23
-            -1863319171: '90F0017D',  # Position 24
-            -1053817559: 'C1300529',  # Position 5 (replacement)
-            1093666578: '41300712',   # Position 20 (replacement)
-            1902118887: '716007E7',   # New replacement
-            1902121595: '7160127B',   # New replacement
-            # Removed inverters (no longer on system):
-            # -1863319175: '90F00179',  # Position 0 - REMOVED
-            # -1863319188: '90F0016C',  # Position 8 - REMOVED
-        }
-        
-        if inverter_id not in current_mapping:
+
+        removed_inverter = configured_inverters.pop(inverter_key)
+
+        for array_key in config.get('arrays', {}):
+            count = len([
+                inv for inv in configured_inverters.values()
+                if inv.get('array') == array_key
+            ])
+            config['arrays'][array_key]['inverter_count'] = count
+
+        if not dashboard._save_inverter_config(config):
             return jsonify({
                 'success': False,
-                'error': f'Inverter ID {inverter_id} not found in current mapping'
+                'error': 'Failed to save configuration'
             })
-        
-        serial = current_mapping[inverter_id]
-        
-        # TODO: In production, you'd actually remove this from the mapping
-        # and reload the dashboard
+
         return jsonify({
             'success': True,
-            'message': f'Inverter {inverter_id} (Serial: {serial}) would be removed',
+            'message': (
+                f'Removed inverter {inverter_key} '
+                f'(Serial: {removed_inverter.get("serial", "Unknown")})'
+            ),
             'removed_inverter': {
-                'id': inverter_id,
-                'serial': serial,
-                'reason': reason
-            },
-            'note': 'This is a preview. In production, this would update the inverter mapping and require a dashboard restart.'
+                'id': inverter_key,
+                'serial': removed_inverter.get('serial'),
+                'reason': reason,
+                'array': removed_inverter.get('array'),
+                'position': removed_inverter.get('position')
+            }
         })
         
     except Exception as e:
