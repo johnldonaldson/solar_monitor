@@ -474,11 +474,22 @@ class InverterAlertManager:
     def send_alert_email(self, alert_msg, detailed_msg, severity):
         """Send alert via email using existing email configuration"""
         try:
-            # Load email config
-            if not os.path.exists('email_config.json'):
+            # Locate config — search DATA_DIR / cwd / module dir
+            email_config_path = None
+            search_dirs = [os.getcwd(), os.path.dirname(__file__)]
+            data_dir = os.environ.get('DATA_DIR')
+            if data_dir:
+                search_dirs.insert(0, data_dir)
+            for d in search_dirs:
+                candidate = os.path.join(d, 'email_config.json')
+                if os.path.exists(candidate):
+                    email_config_path = candidate
+                    break
+
+            if email_config_path is None:
                 return {'success': False, 'error': 'Email not configured'}
-                
-            with open('email_config.json', 'r') as f:
+
+            with open(email_config_path, 'r') as f:
                 config = json.load(f)
             
             # Create email
@@ -508,46 +519,128 @@ class InverterAlertManager:
             print(f"❌ Failed to send alert email: {e}")
             return {'success': False, 'error': str(e)}
     
-    def send_alert_imessage(self, alert_msg, severity):
-        """Send alert via iMessage using existing iMessage configuration"""
+    def _send_imessage_via_ssh(self, phone, short_msg, config):
+        """Send iMessage by SSHing to a Mac and running osascript there."""
         try:
-            # Load iMessage config
-            if not os.path.exists('imessage_config.json'):
+            import paramiko
+        except ImportError:
+            return {'success': False, 'error': 'paramiko not installed; run: pip install paramiko'}
+
+        ssh_host = config['ssh_host']
+        ssh_user = config.get('ssh_user', 'admin')
+        ssh_port = int(config.get('ssh_port', 22))
+        ssh_key_path = config.get('ssh_key_path')
+        ssh_password = config.get('ssh_password')
+
+        # Escape single quotes inside the message so osascript doesn't break
+        safe_msg = short_msg.replace('"', '\\"')
+
+        script = (
+            'tell application "Messages"\n'
+            '    set targetService to 1st service whose service type = iMessage\n'
+            f'    set targetBuddy to buddy "{phone}" of targetService\n'
+            f'    send "{safe_msg}" to targetBuddy\n'
+            'end tell'
+        )
+        command = f"osascript -e '{script.replace(chr(39), chr(39) + chr(92) + chr(39) + chr(39))}'"
+        # Use heredoc to avoid quoting issues with complex scripts
+        command = f'osascript << \'APPLESCRIPT\'\n{script}\nAPPLESCRIPT'
+
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        try:
+            connect_kwargs = {
+                'hostname': ssh_host,
+                'port': ssh_port,
+                'username': ssh_user,
+                'timeout': 15,
+            }
+            if ssh_key_path:
+                connect_kwargs['key_filename'] = ssh_key_path
+            elif ssh_password:
+                connect_kwargs['password'] = ssh_password
+            else:
+                return {'success': False, 'error': 'No SSH auth method (key or password) configured'}
+
+            client.connect(**connect_kwargs)
+            _stdin, stdout, stderr = client.exec_command(command)
+            exit_code = stdout.channel.recv_exit_status()
+            err_output = stderr.read().decode().strip()
+
+            if exit_code == 0:
+                print(f"📱 iMessage sent via SSH ({ssh_user}@{ssh_host}): {short_msg}")
+                return {'success': True}
+            else:
+                print(f"❌ SSH osascript failed (exit {exit_code}): {err_output}")
+                return {'success': False, 'error': err_output}
+        finally:
+            client.close()
+
+    def send_alert_imessage(self, alert_msg, severity):
+        """Send alert via iMessage.
+
+        When ``ssh_enabled`` is true in imessage_config.json the message is
+        delivered by SSHing to the configured Mac host and running osascript
+        there.  This is required when the monitor runs inside a Docker
+        container (Linux) which cannot invoke osascript locally.
+        """
+        try:
+            # Locate config file — search DATA_DIR / cwd as well as the module dir
+            config_path = None
+            search_dirs = [os.getcwd(), os.path.dirname(__file__)]
+            data_dir = os.environ.get('DATA_DIR')
+            if data_dir:
+                search_dirs.insert(0, data_dir)
+            for d in search_dirs:
+                candidate = os.path.join(d, 'imessage_config.json')
+                if os.path.exists(candidate):
+                    config_path = candidate
+                    break
+
+            if config_path is None:
                 return {'success': False, 'error': 'iMessage not configured'}
-                
-            with open('imessage_config.json', 'r') as f:
+
+            with open(config_path, 'r') as f:
                 config = json.load(f)
-            
+
             if not config.get('imessage_enabled', False):
                 return {'success': False, 'error': 'iMessage disabled'}
-            
+
             phone = config['imessage_phone']
-            
-            # Create short message for iMessage
+
+            # Build short message (iMessage has a practical length limit)
             short_msg = f"🚨 {severity}: {alert_msg[:100]}"
             if len(alert_msg) > 100:
                 short_msg += "..."
-            
-            # Send via osascript (macOS only)
-            script = f'''tell application "Messages"
-                set targetService to 1st service whose service type = iMessage
-                set targetBuddy to buddy "{phone}" of targetService
-                send "{short_msg}" to targetBuddy
-            end tell'''
-            
+
+            # --- SSH path (Docker / remote) -----------------------------------
+            if config.get('ssh_enabled', False):
+                return self._send_imessage_via_ssh(phone, short_msg, config)
+
+            # --- Local path (native macOS) ------------------------------------
+            safe_msg = short_msg.replace('"', '\\"')
+            script = (
+                'tell application "Messages"\n'
+                '    set targetService to 1st service whose service type = iMessage\n'
+                f'    set targetBuddy to buddy "{phone}" of targetService\n'
+                f'    send "{safe_msg}" to targetBuddy\n'
+                'end tell'
+            )
+
             result = subprocess.run(
                 ['osascript', '-e', script],
                 capture_output=True,
-                text=True
+                text=True,
+                timeout=15,
             )
-            
+
             if result.returncode == 0:
                 print(f"📱 Alert iMessage sent: {short_msg}")
                 return {'success': True}
             else:
                 print(f"❌ iMessage failed: {result.stderr}")
                 return {'success': False, 'error': result.stderr}
-                
+
         except Exception as e:
             print(f"❌ Failed to send alert iMessage: {e}")
             return {'success': False, 'error': str(e)}

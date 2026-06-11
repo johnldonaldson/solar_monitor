@@ -146,7 +146,7 @@
                     <input type="checkbox" id="imessage-enabled" {{ 'checked' if imessage_config.imessage_enabled else '' }}> Enable iMessage Notifications
                 </label>
                 <small style="color: #666; display: block; margin-top: 5px;">
-                    Send alerts via iMessage (requires macOS with Messages app)
+                    Send alerts via iMessage (requires macOS with Messages app, or SSH to a Mac)
                 </small>
             </div>
             <div class="form-group">
@@ -156,6 +156,37 @@
                     Phone number (with country code) or Apple ID email for iMessage
                 </small>
             </div>
+
+            <hr style="margin: 16px 0;">
+            <h3 style="margin-bottom:10px;">🔐 SSH to Mac (required when running in Docker)</h3>
+            <div class="form-group">
+                <label>
+                    <input type="checkbox" id="imessage-ssh-enabled" {{ 'checked' if imessage_config.ssh_enabled else '' }}> Use SSH to send iMessages
+                </label>
+                <small style="color: #666; display: block; margin-top: 5px;">
+                    The container will SSH to your Mac and run osascript there.
+                </small>
+            </div>
+            <div class="form-group">
+                <label for="imessage-ssh-host">Mac IP / Hostname:</label>
+                <input type="text" id="imessage-ssh-host" placeholder="192.168.1.100" value="{{ imessage_config.ssh_host or '' }}">
+            </div>
+            <div class="form-group">
+                <label for="imessage-ssh-user">SSH Username:</label>
+                <input type="text" id="imessage-ssh-user" placeholder="johndona" value="{{ imessage_config.ssh_user or '' }}">
+            </div>
+            <div class="form-group">
+                <label for="imessage-ssh-port">SSH Port:</label>
+                <input type="number" id="imessage-ssh-port" placeholder="22" value="{{ imessage_config.ssh_port or 22 }}">
+            </div>
+            <div class="form-group">
+                <label for="imessage-ssh-key">SSH Key Path (inside container):</label>
+                <input type="text" id="imessage-ssh-key" placeholder="/secrets/imessage_ssh_key" value="{{ imessage_config.ssh_key_path or '' }}">
+                <small style="color: #666; display: block; margin-top: 5px;">
+                    Mount your private key via the <code>./secrets</code> volume in docker-compose.
+                </small>
+            </div>
+
             <button onclick="saveIMessageConfig()">Save iMessage Config</button>
             <button onclick="testIMessage()">Test iMessage</button>
         </div>
@@ -324,7 +355,12 @@
         function saveIMessageConfig() {
             const config = {
                 imessage_enabled: document.getElementById('imessage-enabled').checked,
-                imessage_phone: document.getElementById('imessage-phone').value
+                imessage_phone: document.getElementById('imessage-phone').value,
+                ssh_enabled: document.getElementById('imessage-ssh-enabled').checked,
+                ssh_host: document.getElementById('imessage-ssh-host').value,
+                ssh_user: document.getElementById('imessage-ssh-user').value,
+                ssh_port: parseInt(document.getElementById('imessage-ssh-port').value) || 22,
+                ssh_key_path: document.getElementById('imessage-ssh-key').value
             };
             
             fetch('/api/admin/imessage-config', {

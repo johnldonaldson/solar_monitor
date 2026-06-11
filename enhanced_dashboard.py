@@ -13,11 +13,12 @@ import threading
 import traceback
 import smtplib
 import copy
+import subprocess
 import requests
 from pathlib import Path
 from datetime import datetime, timedelta
 from email.mime.text import MIMEText
-from flask import Flask, render_template, jsonify, request
+from flask import Flask, render_template, jsonify, request, Response, stream_with_context
 from legacy_chilicon_monitor import ChiliconLegacyMonitor
 from inverter_alert_manager import InverterAlertManager, calculate_sunset_time
 from intelligent_inverter_timing import create_timing_intelligence_integration
@@ -25,11 +26,17 @@ from intelligent_inverter_timing import create_timing_intelligence_integration
 app = Flask(__name__)
 APP_DIR = Path(__file__).resolve().parent
 REPO_DIR = APP_DIR.parent
+# When running in Docker the DATA_DIR env var points to the mounted volume so
+# config/history files persist across container restarts.
+DATA_DIR = Path(os.environ.get('DATA_DIR', '')).resolve() if os.environ.get('DATA_DIR') else None
 
 
 def resolve_existing_path(filename):
     """Return the first existing path for a data or config file."""
-    for base_dir in (Path.cwd(), APP_DIR, REPO_DIR):
+    search_dirs = [Path.cwd(), APP_DIR, REPO_DIR]
+    if DATA_DIR:
+        search_dirs.insert(0, DATA_DIR)
+    for base_dir in search_dirs:
         candidate = base_dir / filename
         if candidate.exists():
             return candidate
@@ -41,6 +48,9 @@ def resolve_path_for_write(filename, default_dir):
     existing = resolve_existing_path(filename)
     if existing is not None:
         return existing
+    # Prefer the persistent data volume when running in Docker
+    if DATA_DIR:
+        return DATA_DIR / filename
     return default_dir / filename
 
 
@@ -56,8 +66,10 @@ def load_json_config(filename, default=None):
         return json.load(file_handle)
 
 # --- Configuration Constants ---
-CHILICON_USERNAME = "johnldonaldson@gmail.com"
-CHILICON_PASSWORD = "P0pc0rn1"
+# Credentials are read from environment variables so they can be injected
+# at runtime (e.g., via docker-compose .env file) rather than being hardcoded.
+CHILICON_USERNAME = os.environ.get('CHILICON_USERNAME', '')
+CHILICON_PASSWORD = os.environ.get('CHILICON_PASSWORD', '')
 INSTALLATION_ID = "384b18e73cb8a7c9364ecbb2b220f774fc815d7aa4126ee574d64f8152ab11c7"
 INSTALLATION_URL = f"https://cloud.chiliconpower.com/installation/{INSTALLATION_ID}"
 DEFAULT_TOTAL_INVERTERS = 25
@@ -96,7 +108,8 @@ class EnhancedDashboard:
         
         # Historical data for charts
         self.power_history = []
-        self.power_history_file = APP_DIR / 'power_history_cache.json'
+        _base = DATA_DIR if DATA_DIR else APP_DIR
+        self.power_history_file = _base / 'power_history_cache.json'
         
         # Load existing power history
         self._load_power_history()
@@ -130,7 +143,7 @@ class EnhancedDashboard:
         self.daily_report_history = []
 
         # Rolling inverter production history (7-day retention)
-        self.production_history_file = APP_DIR / 'inverter_production_history.json'
+        self.production_history_file = (DATA_DIR if DATA_DIR else APP_DIR) / 'inverter_production_history.json'
         self.production_history = self._load_production_history()
         self.current_data['recent_production_history'] = (
             self.production_history[-7:]
@@ -1790,18 +1803,24 @@ def test_email():
 
 @app.route('/api/admin/imessage-config', methods=['POST'])
 def save_imessage_config():
-    """Save iMessage configuration"""
+    """Save iMessage configuration (including optional SSH settings)"""
     try:
         config_data = request.get_json()
-        
-        with open('imessage_config.json', 'w') as f:
+
+        # Validate required fields
+        if 'imessage_phone' not in config_data:
+            return jsonify({'success': False, 'error': 'Missing imessage_phone'})
+
+        # Write to the persistent location (DATA_DIR when in Docker)
+        config_path = resolve_path_for_write('imessage_config.json', APP_DIR)
+        with open(config_path, 'w') as f:
             json.dump(config_data, f, indent=2)
-        
+
         return jsonify({
             'success': True,
             'message': 'iMessage configuration saved successfully'
         })
-        
+
     except Exception as e:
         return jsonify({
             'success': False,
@@ -2879,6 +2898,85 @@ def api_timing_anomalies():
             'success': False,
             'error': f'Failed to get timing anomalies: {str(e)}'
         })
+
+
+@app.route('/logs')
+def logs_page():
+    """Live log viewer page"""
+    return render_template('logs.html')
+
+
+@app.route('/api/logs/stream')
+def logs_stream():
+    """Stream container logs via Server-Sent Events"""
+    tail = request.args.get('tail', '200')
+
+    def generate():
+        # First yield recent history
+        try:
+            proc = subprocess.Popen(
+                ['docker', 'logs', '--tail', str(tail), 'solar-monitor'],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            for line in proc.stdout:
+                yield f"data: {line.rstrip()}\n\n"
+            proc.wait()
+        except FileNotFoundError:
+            # Docker not available — fall back to reading from in-process print output
+            yield "data: [Docker CLI not available inside container — showing startup info only]\n\n"
+            yield f"data: Dashboard started at {dashboard.debug_info.get('thread_start_time', 'unknown')}\n\n"
+            for err in dashboard.debug_info.get('errors', []):
+                yield f"data: ❌ {err.get('error')} @ {err.get('timestamp')}\n\n"
+            return
+
+        # Then follow live
+        try:
+            proc = subprocess.Popen(
+                ['docker', 'logs', '--follow', '--tail', '0', 'solar-monitor'],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            for line in proc.stdout:
+                yield f"data: {line.rstrip()}\n\n"
+        except Exception as e:
+            yield f"data: [Log stream ended: {e}]\n\n"
+
+    return Response(
+        stream_with_context(generate()),
+        mimetype='text/event-stream',
+        headers={
+            'Cache-Control': 'no-cache',
+            'X-Accel-Buffering': 'no',
+        },
+    )
+
+
+@app.route('/api/logs/recent')
+def logs_recent():
+    """Return recent log lines as JSON (no streaming)"""
+    tail = int(request.args.get('tail', '100'))
+    try:
+        result = subprocess.run(
+            ['docker', 'logs', '--tail', str(tail), 'solar-monitor'],
+            capture_output=True, text=True, timeout=10,
+        )
+        lines = (result.stdout + result.stderr).splitlines()
+        return jsonify({'success': True, 'lines': lines})
+    except FileNotFoundError:
+        # Inside container — return debug info instead
+        lines = [
+            f"Dashboard started: {dashboard.debug_info.get('thread_start_time')}",
+            f"Iterations: {dashboard.debug_info.get('iteration_count')}",
+            f"Last operation: {dashboard.debug_info.get('last_operation')}",
+        ]
+        for err in dashboard.debug_info.get('errors', []):
+            lines.append(f"❌ {err.get('error')} @ {err.get('timestamp')}")
+        return jsonify({'success': True, 'lines': lines})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
 
 
 def run_dashboard(host='0.0.0.0', port=5000, debug=False):

@@ -20,6 +20,10 @@ daily_reports/
 # Local credentials
 email_config.json
 imessage_config.json
+.env
+
+# SSH secrets
+secrets/
 
 # Generated logs and directories
 logs/
