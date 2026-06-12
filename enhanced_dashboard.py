@@ -5,6 +5,8 @@ Real-time dashboard with direct data fetching
 """
 
 import os
+import io
+import sys
 import json
 import re
 import time
@@ -15,6 +17,7 @@ import smtplib
 import copy
 import subprocess
 import requests
+from collections import deque
 from pathlib import Path
 from datetime import datetime, timedelta
 from email.mime.text import MIMEText
@@ -22,6 +25,40 @@ from flask import Flask, render_template, jsonify, request, Response, stream_wit
 from legacy_chilicon_monitor import ChiliconLegacyMonitor
 from inverter_alert_manager import InverterAlertManager, calculate_sunset_time
 from intelligent_inverter_timing import create_timing_intelligence_integration
+
+# ── In-process log capture ────────────────────────────────────────────────────
+# Intercept all print() output into a thread-safe ring buffer so the /logs page
+# can stream it without needing the Docker CLI inside the container.
+_LOG_BUFFER = deque(maxlen=2000)
+_LOG_SUBSCRIBERS: list = []
+_LOG_LOCK = threading.Lock()
+
+
+class _TeeStream(io.TextIOBase):
+    """Write to the original stream AND append to the ring buffer."""
+
+    def __init__(self, original):
+        self._original = original
+
+    def write(self, text):
+        if text and text != '\n':
+            entry = text.rstrip('\n')
+            if entry:
+                with _LOG_LOCK:
+                    _LOG_BUFFER.append(entry)
+                    for q in list(_LOG_SUBSCRIBERS):
+                        try:
+                            q.append(entry)
+                        except Exception:
+                            pass
+        return self._original.write(text)
+
+    def flush(self):
+        self._original.flush()
+
+
+sys.stdout = _TeeStream(sys.__stdout__)
+sys.stderr = _TeeStream(sys.__stderr__)
 
 app = Flask(__name__)
 APP_DIR = Path(__file__).resolve().parent
@@ -2908,41 +2945,32 @@ def logs_page():
 
 @app.route('/api/logs/stream')
 def logs_stream():
-    """Stream container logs via Server-Sent Events"""
-    tail = request.args.get('tail', '200')
+    """Stream log lines via Server-Sent Events from the in-process ring buffer."""
 
     def generate():
-        # First yield recent history
-        try:
-            proc = subprocess.Popen(
-                ['docker', 'logs', '--tail', str(tail), 'solar-monitor'],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-            )
-            for line in proc.stdout:
-                yield f"data: {line.rstrip()}\n\n"
-            proc.wait()
-        except FileNotFoundError:
-            # Docker not available — fall back to reading from in-process print output
-            yield "data: [Docker CLI not available inside container — showing startup info only]\n\n"
-            yield f"data: Dashboard started at {dashboard.debug_info.get('thread_start_time', 'unknown')}\n\n"
-            for err in dashboard.debug_info.get('errors', []):
-                yield f"data: ❌ {err.get('error')} @ {err.get('timestamp')}\n\n"
-            return
+        # Send existing history first
+        with _LOG_LOCK:
+            history = list(_LOG_BUFFER)
+            subscriber = deque(maxlen=500)
+            _LOG_SUBSCRIBERS.append(subscriber)
 
-        # Then follow live
         try:
-            proc = subprocess.Popen(
-                ['docker', 'logs', '--follow', '--tail', '0', 'solar-monitor'],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-            )
-            for line in proc.stdout:
-                yield f"data: {line.rstrip()}\n\n"
-        except Exception as e:
-            yield f"data: [Log stream ended: {e}]\n\n"
+            for line in history:
+                yield f"data: {line}\n\n"
+
+            # Then stream new lines as they arrive
+            while True:
+                if subscriber:
+                    line = subscriber.popleft()
+                    yield f"data: {line}\n\n"
+                else:
+                    time.sleep(0.1)
+        finally:
+            with _LOG_LOCK:
+                try:
+                    _LOG_SUBSCRIBERS.remove(subscriber)
+                except ValueError:
+                    pass
 
     return Response(
         stream_with_context(generate()),
@@ -2956,27 +2984,11 @@ def logs_stream():
 
 @app.route('/api/logs/recent')
 def logs_recent():
-    """Return recent log lines as JSON (no streaming)"""
+    """Return recent log lines as JSON (no streaming)."""
     tail = int(request.args.get('tail', '100'))
-    try:
-        result = subprocess.run(
-            ['docker', 'logs', '--tail', str(tail), 'solar-monitor'],
-            capture_output=True, text=True, timeout=10,
-        )
-        lines = (result.stdout + result.stderr).splitlines()
-        return jsonify({'success': True, 'lines': lines})
-    except FileNotFoundError:
-        # Inside container — return debug info instead
-        lines = [
-            f"Dashboard started: {dashboard.debug_info.get('thread_start_time')}",
-            f"Iterations: {dashboard.debug_info.get('iteration_count')}",
-            f"Last operation: {dashboard.debug_info.get('last_operation')}",
-        ]
-        for err in dashboard.debug_info.get('errors', []):
-            lines.append(f"❌ {err.get('error')} @ {err.get('timestamp')}")
-        return jsonify({'success': True, 'lines': lines})
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)})
+    with _LOG_LOCK:
+        lines = list(_LOG_BUFFER)[-tail:]
+    return jsonify({'success': True, 'lines': lines})
 
 
 def run_dashboard(host='0.0.0.0', port=5000, debug=False):

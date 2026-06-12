@@ -1,0 +1,27 @@
+### Stage 1 — build
+FROM python:3.11-alpine AS builder
+
+RUN apk add --no-cache gcc musl-dev libffi-dev
+
+WORKDIR /app
+COPY requirements-mcp.txt .
+RUN pip install --no-cache-dir --prefix=/install -r requirements-mcp.txt
+
+### Stage 2 — runtime
+FROM python:3.11-alpine
+
+WORKDIR /app
+
+COPY --from=builder /install /usr/local
+
+COPY solar_mcp_server.py .
+
+VOLUME ["/data"]
+
+ENV DASHBOARD_URL="http://solar-monitor:5001"
+ENV MCP_HOST="0.0.0.0"
+ENV MCP_PORT="3001"
+
+EXPOSE 3001
+
+CMD ["python", "solar_mcp_server.py"]

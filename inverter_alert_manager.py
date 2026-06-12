@@ -59,8 +59,10 @@ def calculate_sunset_time(latitude=37.7749, longitude=-122.4194):
 
 class InverterAlertManager:
     def __init__(self):
-        self.alert_state_file = 'alert_state.json'
-        self.production_history_file = Path('inverter_production_history.json')
+        # Resolve data directory — prefer DATA_DIR volume when running in Docker
+        _data_dir = Path(os.environ.get('DATA_DIR', '')).resolve() if os.environ.get('DATA_DIR') else Path(__file__).resolve().parent
+        self.alert_state_file = str(_data_dir / 'alert_state.json')
+        self.production_history_file = _data_dir / 'inverter_production_history.json'
         
         # Initialize timing intelligence for smart alerting
         try:
@@ -608,8 +610,11 @@ class InverterAlertManager:
 
             phone = config['imessage_phone']
 
-            # Build short message (iMessage has a practical length limit)
-            short_msg = f"🚨 {severity}: {alert_msg[:100]}"
+            # Build short message — avoid doubling severity if already in the message
+            if alert_msg.upper().startswith(severity.upper()):
+                short_msg = f"🚨 {alert_msg[:110]}"
+            else:
+                short_msg = f"🚨 {severity}: {alert_msg[:100]}"
             if len(alert_msg) > 100:
                 short_msg += "..."
 
@@ -760,9 +765,22 @@ Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
         try:
             # Load configurations
             try:
-                with open('alert_config.json', 'r') as f:
-                    alert_config = json.load(f)
-            except:
+                search_dirs = [os.getcwd(), os.path.dirname(__file__)]
+                data_dir = os.environ.get('DATA_DIR')
+                if data_dir:
+                    search_dirs.insert(0, data_dir)
+                alert_config_path = None
+                for d in search_dirs:
+                    candidate = os.path.join(d, 'alert_config.json')
+                    if os.path.exists(candidate):
+                        alert_config_path = candidate
+                        break
+                if alert_config_path:
+                    with open(alert_config_path, 'r') as f:
+                        alert_config = json.load(f)
+                else:
+                    raise FileNotFoundError('alert_config.json not found')
+            except Exception:
                 print("⚠️ Alert config not found, using defaults")
                 alert_config = {}
             

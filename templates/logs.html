@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Solar Monitor — Logs</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            background: #0d1117;
+            color: #c9d1d9;
+            font-family: 'Menlo', 'Monaco', 'Courier New', monospace;
+            font-size: 13px;
+        }
+
+        header {
+            background: #161b22;
+            border-bottom: 1px solid #30363d;
+            padding: 12px 20px;
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            position: sticky;
+            top: 0;
+            z-index: 10;
+        }
+
+        header h1 { font-size: 16px; color: #f0f6fc; }
+
+        .controls { display: flex; gap: 8px; align-items: center; margin-left: auto; }
+
+        button {
+            background: #21262d;
+            border: 1px solid #30363d;
+            color: #c9d1d9;
+            padding: 5px 12px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 12px;
+        }
+        button:hover { background: #30363d; }
+        button.active { background: #1f6feb; border-color: #1f6feb; color: #fff; }
+
+        .status-dot {
+            width: 8px; height: 8px;
+            border-radius: 50%;
+            background: #3fb950;
+            display: inline-block;
+        }
+        .status-dot.disconnected { background: #f85149; }
+
+        #log-container {
+            padding: 12px 20px;
+            height: calc(100vh - 53px);
+            overflow-y: auto;
+        }
+
+        .log-line {
+            white-space: pre-wrap;
+            word-break: break-all;
+            line-height: 1.6;
+            padding: 1px 0;
+        }
+
+        /* Colour coding */
+        .log-line.error   { color: #f85149; }
+        .log-line.warning { color: #e3b341; }
+        .log-line.success { color: #3fb950; }
+        .log-line.info    { color: #79c0ff; }
+        .log-line.http    { color: #8b949e; }
+
+        #filter-input {
+            background: #0d1117;
+            border: 1px solid #30363d;
+            color: #c9d1d9;
+            padding: 5px 10px;
+            border-radius: 6px;
+            font-size: 12px;
+            width: 200px;
+        }
+
+        #line-count {
+            font-size: 11px;
+            color: #8b949e;
+        }
+    </style>
+</head>
+<body>
+
+<header>
+    <span class="status-dot" id="status-dot"></span>
+    <h1>☀️ Solar Monitor — Live Logs</h1>
+    <div class="controls">
+        <input id="filter-input" type="text" placeholder="Filter..." oninput="applyFilter()">
+        <button onclick="toggleScroll()" id="scroll-btn" class="active">Auto-scroll ON</button>
+        <button onclick="clearLogs()">Clear</button>
+        <button onclick="location.href='/'">Dashboard</button>
+        <button onclick="location.href='/admin'">Admin</button>
+        <span id="line-count">0 lines</span>
+    </div>
+</header>
+
+<div id="log-container"></div>
+
+<script>
+    let autoScroll = true;
+    let totalLines = 0;
+    let filterText = '';
+    const container = document.getElementById('log-container');
+    const dot = document.getElementById('status-dot');
+
+    function classifyLine(text) {
+        if (/❌|Error|error|Traceback|CRITICAL|failed/i.test(text)) return 'error';
+        if (/⚠️|WARNING|warning/i.test(text)) return 'warning';
+        if (/✅|success|Success/i.test(text)) return 'success';
+        if (/HTTP\/1\.\d/.test(text)) return 'http';
+        if (/🌐|📊|🔐|🔌|📱|📧|🕐|💓|🌅|🧠|🔄/u.test(text)) return 'info';
+        return '';
+    }
+
+    function appendLine(text) {
+        totalLines++;
+        const div = document.createElement('div');
+        div.className = 'log-line ' + classifyLine(text);
+        div.textContent = text;
+        if (filterText && !text.toLowerCase().includes(filterText)) {
+            div.style.display = 'none';
+        }
+        container.appendChild(div);
+        document.getElementById('line-count').textContent = totalLines + ' lines';
+        if (autoScroll) container.scrollTop = container.scrollHeight;
+    }
+
+    function applyFilter() {
+        filterText = document.getElementById('filter-input').value.toLowerCase();
+        container.querySelectorAll('.log-line').forEach(el => {
+            el.style.display = (!filterText || el.textContent.toLowerCase().includes(filterText)) ? '' : 'none';
+        });
+    }
+
+    function toggleScroll() {
+        autoScroll = !autoScroll;
+        const btn = document.getElementById('scroll-btn');
+        btn.textContent = autoScroll ? 'Auto-scroll ON' : 'Auto-scroll OFF';
+        btn.classList.toggle('active', autoScroll);
+    }
+
+    function clearLogs() {
+        container.innerHTML = '';
+        totalLines = 0;
+        document.getElementById('line-count').textContent = '0 lines';
+    }
+
+    function connect() {
+        const evtSource = new EventSource('/api/logs/stream');
+
+        evtSource.onopen = () => {
+            dot.className = 'status-dot';
+        };
+
+        evtSource.onmessage = (e) => {
+            if (e.data) appendLine(e.data);
+        };
+
+        evtSource.onerror = () => {
+            dot.className = 'status-dot disconnected';
+            evtSource.close();
+            // Reconnect after 3 seconds
+            setTimeout(connect, 3000);
+        };
+    }
+
+    connect();
+</script>
+</body>
+</html>

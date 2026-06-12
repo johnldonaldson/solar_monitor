@@ -1,0 +1,4 @@
+# solar-monitor service dependencies
+flask>=2.3.0
+requests>=2.31.0
+paramiko>=3.3.0

@@ -1,0 +1,45 @@
+services:
+
+  # ── Solar Dashboard (Flask) ────────────────────────────────────────────────
+  solar-monitor:
+    build: .
+    container_name: solar-monitor
+    restart: unless-stopped
+    ports:
+      - "5001:5001"
+    volumes:
+      # Bind-mount the project directory so config/history JSON files on the
+      # host are read and written directly — they survive image rebuilds.
+      - .:/data
+      # Mount templates so changes take effect without rebuilding the image
+      - ./templates:/app/templates:ro
+      # Mount SSH key for iMessage (read-only)
+      # Place your private key at ./secrets/imessage_ssh_key
+      - ./secrets:/secrets:ro
+      # Sync timezone from host
+      - /etc/localtime:/etc/localtime:ro
+    environment:
+      # Chilicon cloud credentials — set these in a .env file (see .env.example)
+      CHILICON_USERNAME: ${CHILICON_USERNAME}
+      CHILICON_PASSWORD: ${CHILICON_PASSWORD}
+      DATA_DIR: /data
+      TZ: ${TZ:-America/Los_Angeles}
+
+  # ── MCP / SSE Server ──────────────────────────────────────────────────────
+  solar-mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile.mcp
+    container_name: solar-mcp
+    restart: unless-stopped
+    ports:
+      - "3001:3001"
+    volumes:
+      - .:/data
+    environment:
+      # Internal URL to reach the dashboard from within the Docker network
+      DASHBOARD_URL: http://solar-monitor:5001
+      MCP_HOST: 0.0.0.0
+      MCP_PORT: 3001
+    depends_on:
+      - solar-monitor
