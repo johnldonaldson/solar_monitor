@@ -1260,7 +1260,7 @@ Next report will be sent tomorrow after sunset (~{(sunset_time + timedelta(days=
                 self._ajax_session = monitor.session
             
             # Get today's date in the format expected by the API
-            today = datetime.now().strftime('%Y-%-m-%-d')
+            today = datetime.now().strftime('%Y-%m-%d')
             
             # AJAX endpoint URL
             ajax_url = f"https://cloud.chiliconpower.com/ajax/fetchData?selection=p_out_avg&lastDay={today}&timeSpan=1&aggregateView=none"
@@ -2989,6 +2989,33 @@ def logs_recent():
     with _LOG_LOCK:
         lines = list(_LOG_BUFFER)[-tail:]
     return jsonify({'success': True, 'lines': lines})
+
+
+@app.route('/api/logs/download')
+def logs_download():
+    """Download the full in-memory log buffer as a tar.gz archive."""
+    import tarfile
+    with _LOG_LOCK:
+        lines = list(_LOG_BUFFER)
+
+    log_bytes = '\n'.join(lines).encode('utf-8')
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    log_name = f'solar_monitor_{timestamp}.log'
+
+    tar_buf = io.BytesIO()
+    with tarfile.open(fileobj=tar_buf, mode='w:gz') as tar:
+        info = tarfile.TarInfo(name=log_name)
+        info.size = len(log_bytes)
+        tar.addfile(info, io.BytesIO(log_bytes))
+
+    tar_buf.seek(0)
+    return Response(
+        tar_buf.read(),
+        mimetype='application/gzip',
+        headers={
+            'Content-Disposition': f'attachment; filename=solar_monitor_logs_{timestamp}.tar.gz'
+        }
+    )
 
 
 def run_dashboard(host='0.0.0.0', port=5000, debug=False):
