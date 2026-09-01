@@ -2811,6 +2811,23 @@ def api_current():
     return jsonify(current_data)
 
 
+@app.route('/api/power')
+def api_power():
+    """Lightweight current-power snapshot"""
+    d = dashboard.get_current_data()
+    power_kw = d.get('power_kw') or 0.0
+    return jsonify({
+        'power_kw': power_kw,
+        'power_w': round(power_kw * 1000, 1),
+        'energy_today_kwh': d.get('energy_today_kwh'),
+        'active_inverters': d.get('active_inverters'),
+        'total_inverters': d.get('total_inverters'),
+        'health_status': d.get('health_status'),
+        'is_online': d.get('is_online'),
+        'last_update': d.get('last_update'),
+    })
+
+
 @app.route('/api/history')
 def api_history():
     """Get power history for charts"""
